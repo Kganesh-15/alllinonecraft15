@@ -135,13 +135,18 @@ export const continueStory = async (jobId, existingPages = [], { onProgress, sig
 
 export const generateVideo = async (
   prompt,
-  { onProgress, timeoutMs = 10 * 60 * 1000, signal } = {}
+  { duration = 5, onProgress, timeoutMs = 10 * 60 * 1000, signal } = {}
 ) => {
   const cleanPrompt = String(prompt || '').trim();
   if (!cleanPrompt) throw new Error('Please describe the video first.');
+  const requestedDuration = Number(duration);
+  if (![5, 8].includes(requestedDuration)) {
+    throw new Error('Video duration must be 5 or 8 seconds.');
+  }
+  const cleanDuration = requestedDuration;
   const startData = await request(
     `${API_BASE}/api/generate-video`,
-    jsonBody({ prompt: cleanPrompt }),
+    jsonBody({ prompt: cleanPrompt, duration: cleanDuration }),
     45000
   );
   if (!startData.jobId) throw new Error('The video service did not return a job ID.');

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { ArrowUpRight, Wand2, Sparkles, Download, Check } from "lucide-react";
+import { ArrowUpRight, Play, Sparkles, Download, Check } from "lucide-react";
 
 /* PlotCraft animated editor hero.
    A live mock timeline: playhead, karaoke captions, clip reveals, transition nodes,
@@ -7,7 +7,6 @@ import { ArrowUpRight, Wand2, Sparkles, Download, Check } from "lucide-react";
 
 const LOOP_MS = 12000;
 const WORDS = ["Create", "stunning", "studio", "videos", "in", "seconds."];
-const ROTATING = ["Write stories.", "Paint artwork.", "Cut videos.", "Explore ideas."];
 
 const CLIPS = [
   { t: "Intro", s: 0.0, e: 0.18, c: "#7c3aed", scene: "#7c3aed" },
@@ -50,12 +49,11 @@ const WAVE = Array.from({ length: 84 }, (_, i) =>
 const pad = (n) => String(n).padStart(2, "0");
 const inRange = (p, a, b) => p >= a && p < b;
 
-export default function PlotCraftHero({ onStart, onChat }) {
+export default function PlotCraftHero({ onStart, onDemo }) {
   const [reduce] = useState(
     () => typeof window !== "undefined" && !!window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
   );
   const [p, setP] = useState(0.12);
-  const [rot, setRot] = useState(0);
   const [hoverFx, setHoverFx] = useState(-1);
 
   // Smooth playhead driven by requestAnimationFrame (throttled to ~20fps state updates).
@@ -74,11 +72,6 @@ export default function PlotCraftHero({ onStart, onChat }) {
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
   }, [reduce]);
-
-  useEffect(() => {
-    const id = setInterval(() => setRot((r) => (r + 1) % ROTATING.length), 2600);
-    return () => clearInterval(id);
-  }, []);
 
   const litWords = Math.min(WORDS.length, Math.floor(p * WORDS.length * 1.15) + 1);
   const secs = p * (LOOP_MS / 1000);
@@ -106,9 +99,13 @@ export default function PlotCraftHero({ onStart, onChat }) {
         .eh-pill { display: inline-flex; align-items: center; gap: 8px; padding: 7px 13px; border-radius: 999px;
           border: 1px solid rgba(255,255,255,.14); background: rgba(255,255,255,.06); font-size: 11px; font-weight: 800;
           letter-spacing: .12em; text-transform: uppercase; animation: ehUp .8s cubic-bezier(.16,1,.3,1) both; }
+        .eh-stats { list-style: none; margin: 22px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 10px; animation: ehUp .9s .28s cubic-bezier(.16,1,.3,1) both; }
+        .eh-stats li { display: inline-flex; align-items: center; gap: 8px; padding: 9px 14px; border-radius: 999px; font-size: 12px; font-weight: 700; color: #e5e7eb; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12); transition: transform .35s cubic-bezier(.16,1,.3,1), background .3s ease; }
+        .eh-stats li:hover { transform: translateY(-2px); background: rgba(255,255,255,.12); }
+        .eh-stats b { color: #fde68a; font-weight: 900; }
         .eh-h1 { margin-top: 20px; font-size: clamp(2.4rem, 5vw, 4.3rem); font-weight: 900; line-height: 1.02; letter-spacing: -0.04em; animation: ehUp .9s .08s cubic-bezier(.16,1,.3,1) both; }
         .eh-grad { background: linear-gradient(100deg, #c4b5fd 0%, #f9a8d4 40%, #fde68a 70%, #bae6fd 100%); -webkit-background-clip: text; background-clip: text; color: transparent; background-size: 200% 100%; animation: ehUp .9s .16s cubic-bezier(.16,1,.3,1) both, ehShine 7s linear infinite; }
-        .eh-rot { display: block; font-size: 22px; line-height: 1.4; height: 1.4em; overflow: hidden; margin-top: 6px; padding-bottom: 2px; }
+        .eh-rot-unused { display: block; font-size: 22px; line-height: 1.4; height: 1.4em; overflow: hidden; margin-top: 6px; padding-bottom: 2px; }
         .eh-rot span { display: inline-block; color: #e9d5ff; font-weight: 800; font-size: inherit; line-height: 1.4; animation: ehRotIn .7s cubic-bezier(.16,1,.3,1) both; }
         .eh-sub { margin-top: 18px; max-width: 520px; font-size: 15px; line-height: 1.7; color: rgba(229,231,235,.72); animation: ehUp .9s .24s cubic-bezier(.16,1,.3,1) both; }
         .eh-cta { margin-top: 28px; display: flex; flex-wrap: wrap; gap: 12px; animation: ehUp .9s .32s cubic-bezier(.16,1,.3,1) both; }
@@ -202,23 +199,24 @@ export default function PlotCraftHero({ onStart, onChat }) {
 
       <div className="eh-grid">
         <div>
-          <div className="eh-pill"><Sparkles size={12} /> Your creative space</div>
+          <div className="eh-pill"><Sparkles size={12} /> AI-Powered Creative Studio</div>
           <h1 className="eh-h1">
-            Make ideas<br />
-            <span className="eh-grad">come alive.</span>
+            Create Stories, <br />
+            <span className="eh-grad">Images, Videos &amp; Music</span>
           </h1>
-          <div className="eh-rot" aria-live="polite">
-            <span key={rot}>{ROTATING[rot]}</span>
-          </div>
-          <p className="eh-sub">
-            A calmer place to write stories, create artwork, edit videos and explore new ideas — all inside PlotCraft.
-          </p>
+          <p className="eh-sub">Using One AI-Powered Creative Studio. Write, draw, edit and compose in a single place.</p>
+          <ul className="eh-stats" aria-label="Highlights">
+            <li><b>28</b> AI Tools</li>
+            <li><b>∞</b> Unlimited Projects</li>
+            <li><b>✓</b> Auto Save</li>
+            <li><b>↗</b> Export Anywhere</li>
+          </ul>
           <div className="eh-cta">
             <button type="button" className="eh-btn eh-btn-primary" onClick={onStart}>
-              Start creating <ArrowUpRight size={16} />
+              Start Creating <ArrowUpRight size={16} />
             </button>
-            <button type="button" className="eh-btn eh-btn-ghost" onClick={onChat}>
-              <Wand2 size={15} /> Open AI Chat
+            <button type="button" className="eh-btn eh-btn-ghost" onClick={onDemo || (() => document.querySelector(".ws-section")?.scrollIntoView({ behavior: "smooth", block: "start" }))}>
+              <Play size={14} /> View Demo
             </button>
           </div>
         </div>

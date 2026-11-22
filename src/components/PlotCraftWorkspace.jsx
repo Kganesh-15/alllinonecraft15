@@ -1,5 +1,13 @@
-import React from "react";
+import { useState } from "react";
 import { ArrowUpRight, ArrowRight, Sparkles, Trash2 } from "lucide-react";
+
+const STATS_KEY = "plotcraft_tool_stats";
+const readStats = () => {
+  try { return JSON.parse(localStorage.getItem(STATS_KEY) || "{}"); } catch { return {}; }
+};
+const writeStats = (s) => {
+  try { localStorage.setItem(STATS_KEY, JSON.stringify(s)); } catch { /* storage blocked */ }
+};
 
 /* PlotCraft workspace: premium tiles with tilt, spotlight, sheen, glyph float,
    staggered entrance, animated welcome hero, resume cards. Works in light and dark. */
@@ -53,10 +61,21 @@ const WS_CSS = `
 .ws-go { margin-top:14px; display:inline-flex; align-items:center; gap:6px; font-size:11px; font-weight:800; color:var(--a);
   opacity:0; transform:translateX(-6px); transition:opacity .35s ease, transform .45s cubic-bezier(.16,1,.3,1); }
 .ws-tile:hover .ws-go { opacity:1; transform:none; }
+.ws-tile:focus-within .ws-go { opacity:1; transform:none; }
 .ws-bar { position:absolute; left:0; bottom:0; height:3px; width:0; background:linear-gradient(90deg,var(--a),transparent);
   transition:width .6s cubic-bezier(.16,1,.3,1); }
 .ws-tile:hover .ws-bar { width:100%; }
 .ws-tile.ws-compact { min-height:150px; padding:18px; border-radius:22px; }
+.ws-tile-main { position:absolute; inset:0; z-index:1; display:flex; flex-direction:column; padding:18px 48px 18px 18px;
+  border:0; background:transparent; color:inherit; font:inherit; text-align:left; cursor:pointer; }
+.ws-tile-main:focus-visible { outline:3px solid color-mix(in srgb,var(--a) 70%,white); outline-offset:-5px; border-radius:inherit; }
+.ws-fav { position:absolute; top:10px; right:10px; z-index:2; display:grid; place-items:center; width:34px; height:34px;
+  padding:0; border:0; border-radius:12px; background:transparent; font-size:17px; line-height:1; opacity:.55; cursor:pointer; color:var(--ws-muted);
+  transition:opacity .3s ease, color .3s ease, transform .4s cubic-bezier(.16,1,.3,1); }
+.ws-fav:hover { opacity:1; transform:scale(1.15); }
+.ws-fav:focus-visible { outline:2px solid #fbbf24; outline-offset:2px; opacity:1; }
+.ws-fav.on { opacity:1; color:#fbbf24; text-shadow:0 0 12px rgba(251,191,36,.6); }
+.ws-chip, .ws-rc, .ws-tile { transition:transform .35s cubic-bezier(.16,1,.3,1), box-shadow .45s ease, border-color .45s ease, background .3s ease, opacity .3s ease; }
 
 .ws-hero { position:relative; isolation:isolate; overflow:hidden; border-radius:28px; padding:clamp(22px,4vw,40px); color:#fff;
   background:#0b1020; animation:wsIn .8s cubic-bezier(.16,1,.3,1) backwards; }
@@ -93,6 +112,7 @@ const WS_CSS = `
 .ws-rc-del { opacity:0; border:0; background:none; color:var(--ws-muted); padding:7px; border-radius:10px; cursor:pointer; transition:opacity .3s ease, background .3s ease, color .3s ease; }
 .ws-rc:hover .ws-rc-del, .ws-rc-del:focus-visible { opacity:1; }
 .ws-rc-del:hover { background:rgba(244,63,94,.16); color:#f43f5e; }
+.ws-rc-del:focus-visible { outline:2px solid #f43f5e; outline-offset:2px; }
 
 .ws-head { display:flex; align-items:center; gap:12px; margin-bottom:14px; }
 .ws-head h2 { font-size:11px; font-weight:900; letter-spacing:.18em; text-transform:uppercase; color:var(--ws-muted); }
@@ -100,6 +120,13 @@ const WS_CSS = `
 .ws-head::after { content:""; flex:1; height:1px; background:linear-gradient(90deg,var(--ws-line),transparent); }
 .ws-section + .ws-section { margin-top:36px; }
 
+@media (max-width:640px) {
+  .ws-hero { padding-top:22px; }
+  .ws-save { position:relative; top:auto; right:auto; width:max-content; max-width:100%; margin:0 0 18px auto; }
+}
+@media (hover:none) {
+  .ws-go, .ws-rc-del { opacity:1; transform:none; }
+}
 @media (prefers-reduced-motion:reduce) {
   .ws-root *, .ws-root { animation:none !important; transition:none !important; }
 }
@@ -201,7 +228,7 @@ export function WorkspaceRecent({ items, iconOf, shortOf, onOpenProject, onDelet
                 <button type="button" className="ws-rc-open" onClick={() => onOpenProject(p)}>
                   <span className="ws-rc-title">{p.title}</span>
                   <span className="ws-rc-meta">
-                    {shortOf(p.category)} · {new Date(p.updatedAt || Date.now()).toLocaleDateString()}
+                    {shortOf(p.category)} · {p.updatedAt ? new Date(p.updatedAt).toLocaleDateString() : "Recently updated"}
                     <ArrowRight size={12} className="ws-rc-go" />
                   </span>
                 </button>
@@ -219,34 +246,116 @@ export function WorkspaceRecent({ items, iconOf, shortOf, onOpenProject, onDelet
 
 /* 4. Studio group grids (Create, Video, Make, Learn...). */
 export function WorkspaceGroup({ name, list, onOpen, index = 0 }) {
+  const [stats, setStats] = useState(readStats);
+  const isFav = (id) => Boolean(stats[id]?.fav);
+  const usesOf = (id) => stats[id]?.uses || 0;
+  const open = (id) => {
+    const s = readStats();
+    s[id] = { uses: (s[id]?.uses || 0) + 1, fav: Boolean(s[id]?.fav) };
+    writeStats(s);
+    setStats(s);
+    onOpen(id);
+  };
+  const toggleFav = (id) => {
+    const s = readStats();
+    s[id] = { uses: s[id]?.uses || 0, fav: !s[id]?.fav };
+    writeStats(s);
+    setStats(s);
+  };
+  const ordered = [...list].sort((a, b) => Number(isFav(b.id)) - Number(isFav(a.id)));
   return (
     <Wrap>
       <section className="ws-section">
         <div className="ws-head"><h2>{name}</h2><span className="ws-count">{list.length}</span></div>
         <div className="ws-grid ws-four">
-          {list.map((c, i) => {
+          {ordered.map((c, i) => {
             const Icon = c.Icon;
             const a = colorFor(c.id);
             return (
-              <button
+              <div
                 key={c.id}
-                type="button"
                 className="ws-tile ws-compact"
                 style={{ "--a": a, "--d": `${(index * 4 + i) * 45}ms` }}
                 onPointerMove={onTilt}
                 onPointerLeave={onUntilt}
-                onClick={() => onOpen(c.id)}
               >
-                <span className="ws-glyph"><Icon size={26} /></span>
-                <span className="ws-title">{c.title}</span>
-                <span className="ws-detail">{c.subtitle}</span>
-                <span className="ws-go">Open <ArrowUpRight size={13} /></span>
-                <span className="ws-bar" />
-              </button>
+                <button
+                  type="button"
+                  aria-label={isFav(c.id) ? "Remove from favourites" : "Add to favourites"}
+                  aria-pressed={isFav(c.id)}
+                  title={isFav(c.id) ? "Favourite" : "Add to favourites"}
+                  className={`ws-fav ${isFav(c.id) ? "on" : ""}`}
+                  onClick={() => toggleFav(c.id)}
+                >★</button>
+                <button type="button" className="ws-tile-main" onClick={() => open(c.id)} aria-label={`Open ${c.title}`}>
+                  <span className="ws-glyph"><Icon size={26} /></span>
+                  <span className="ws-title">{c.title}</span>
+                  <span className="ws-detail">{c.subtitle}{usesOf(c.id) > 0 ? ` · Used ${usesOf(c.id)}×` : ""}</span>
+                  <span className="ws-go">Open <ArrowUpRight size={13} /></span>
+                  <span className="ws-bar" />
+                </button>
+              </div>
             );
           })}
         </div>
       </section>
     </Wrap>
+  );
+}
+
+/* Dashboard backdrop: drifting colour mesh, fading grid, grain and rising light motes.
+   Sits behind all content (z -1 inside an isolated parent). Matches the welcome page palette. */
+const DBK_CSS = `
+.dbk { position:absolute; inset:0; z-index:-1; pointer-events:none; overflow:hidden; }
+.dbk-mesh { position:absolute; inset:-20%; opacity:.9;
+  background:
+    radial-gradient(40% 35% at 14% 18%, rgba(124,58,237,.34), transparent 70%),
+    radial-gradient(34% 30% at 86% 14%, rgba(219,39,119,.28), transparent 70%),
+    radial-gradient(40% 36% at 72% 92%, rgba(245,158,11,.20), transparent 70%),
+    radial-gradient(34% 30% at 8% 86%, rgba(14,165,233,.18), transparent 70%);
+  animation:dbkDrift 26s ease-in-out infinite alternate; }
+@keyframes dbkDrift { from { transform:translate3d(-2%,-1%,0) rotate(0deg) scale(1); } to { transform:translate3d(2%,3%,0) rotate(4deg) scale(1.06); } }
+.dbk-grid { position:absolute; inset:0;
+  background-image:linear-gradient(rgba(127,127,127,.09) 1px, transparent 1px), linear-gradient(90deg, rgba(127,127,127,.09) 1px, transparent 1px);
+  background-size:56px 56px; -webkit-mask-image:linear-gradient(to bottom, #000 0%, transparent 65%); mask-image:linear-gradient(to bottom, #000 0%, transparent 65%); }
+.dbk-noise { position:absolute; inset:0; opacity:.06; mix-blend-mode:overlay;
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.8' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>"); }
+.dbk-mote { position:absolute; bottom:-12px; border-radius:50%; opacity:0; animation:dbkRise linear infinite; }
+@keyframes dbkRise { 0% { transform:translateY(0); opacity:0; } 12% { opacity:.85; } 100% { transform:translateY(-115vh); opacity:0; } }
+@media (prefers-reduced-motion: reduce) { .dbk * { animation:none !important; } }
+`;
+
+const DBK_COLORS = ["#a78bfa", "#f472b6", "#fbbf24", "#38bdf8", "#c4b5fd"];
+const DBK_MOTES = Array.from({ length: 18 }, (_, i) => ({
+  left: (i * 37) % 100,
+  size: 2 + ((i * 7) % 4),
+  dur: 14 + ((i * 5) % 12),
+  delay: -((i * 3) % 14),
+  color: DBK_COLORS[i % DBK_COLORS.length],
+}));
+
+export function DashboardBackdrop() {
+  return (
+    <div className="dbk" aria-hidden="true">
+      <style>{DBK_CSS}</style>
+      <div className="dbk-mesh" />
+      <div className="dbk-grid" />
+      <div className="dbk-noise" />
+      {DBK_MOTES.map((m, i) => (
+        <span
+          key={i}
+          className="dbk-mote"
+          style={{
+            left: `${m.left}%`,
+            width: m.size,
+            height: m.size,
+            background: m.color,
+            boxShadow: `0 0 12px ${m.color}`,
+            animationDuration: `${m.dur}s`,
+            animationDelay: `${m.delay}s`,
+          }}
+        />
+      ))}
+    </div>
   );
 }

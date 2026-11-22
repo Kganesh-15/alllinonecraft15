@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Sparkles, BookOpenCheck, Bot, Cloud, Volume2, Wand2, Palette, Star, Compass, ArrowRight, Flame, Zap, FolderOpen, Search } from "lucide-react";
 
 const USAGE_STEPS = [

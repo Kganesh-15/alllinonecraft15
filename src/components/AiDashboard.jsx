@@ -2,13 +2,60 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import * as THREE from "three";
 import { OrbitControls, Html, Sparkles as DreiSparkles, Float as DreiFloat, Stars as DreiStars } from "@react-three/drei";
 import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
-import ProjectsPanel, { ProjectWorkspace, TemplatesGallery, CommunityFeed } from "./ProjectsPanel";
 import PlotCraftFX from "./PlotCraftFX";
 import PlotCraftDesign from "./PlotCraftDesign";
+import PlotCraftLogo from "./PlotCraftLogo";
+import ReadAloudButton from "./ReadAloudButton";
+import StoryViewer from "./StoryViewer";
 import * as PlotCraftHeroModule from "./PlotCraftHero";
 const PlotCraftHero = PlotCraftHeroModule.default ?? PlotCraftHeroModule.PlotCraftHero;
-import { WorkspaceShortcuts, WorkspaceWelcome, WorkspaceRecent, WorkspaceGroup } from "./PlotCraftWorkspace.jsx";
-import VfxToolPanel from "./PlotCraftVfxTools.jsx";
+import { WorkspaceShortcuts, WorkspaceWelcome, WorkspaceRecent, WorkspaceGroup, DashboardBackdrop } from "./PlotCraftWorkspace";
+import { isSpeechSupported, speakText, stopSpeaking } from "../services/speech";
+import VoiceInputButton from "./VoiceInputButton";
+import {
+  apiRequest,
+  getToken,
+  setToken,
+  uploadUserAsset,
+  registerUser,
+  loginUser,
+  logoutUser,
+  fetchMe,
+  listChats,
+  getChat,
+  saveChat,
+  deleteChat,
+} from "../services/api";
+import {
+  chatAI,
+  generateImage,
+  generateImageWithInfo,
+  generateStory,
+  continueStory,
+  generateVideo,
+  uploadVideoFile,
+} from "../services/openai";
+import { API_BASE } from "../services/config";
+
+const LazyProjectsPanel = React.lazy(() => import("./ProjectsPanel"));
+const LazyPhotoDocumentEditor = React.lazy(() => import("./PhotoDocumentEditor.jsx"));
+const LazyProjectWorkspace = React.lazy(() => import("./ProjectsPanel").then((module) => ({ default: module.ProjectWorkspace })));
+const LazyTemplatesGallery = React.lazy(() => import("./ProjectsPanel").then((module) => ({ default: module.TemplatesGallery })));
+const LazyCommunityFeed = React.lazy(() => import("./ProjectsPanel").then((module) => ({ default: module.CommunityFeed })));
+const LazyPromptHelper = React.lazy(() => import("./PromptHelper"));
+const LazyFreeVideoHelper = React.lazy(() => import("./FreeVideoHelper"));
+const LazyVfxToolPanel = React.lazy(() => import("./PlotCraftVfxTools"));
+const LazyUtilityTools = React.lazy(() => import("./PlotCraftUtilities"));
+const LazyAboutPage = React.lazy(() => import("./AboutPage"));
+const LazyUsagePage = React.lazy(() => import("./UsagePage"));
+
+function PanelFallback({ label }) {
+  return (
+    <div role="status" className="flex items-center justify-center gap-2 p-8 text-sm opacity-70">
+      <Loader2 className="h-4 w-4 animate-spin" /> Loading {label}…
+    </div>
+  );
+}
 import {
   Sparkles,
   Plus,
@@ -30,10 +77,6 @@ import {
   Download,
   Droplet,
   Star,
-  Heart,
-  BookOpenCheck,
-  Bot,
-  Compass,
   ExternalLink,
   Info,
   HelpCircle,
@@ -43,7 +86,6 @@ import {
   MessageSquare,
   Menu,
   Home,
-  ChevronLeft,
   Code2,
   Phone,
   Mail,
@@ -69,13 +111,10 @@ import {
   Square,
   Circle,
   Users,
-  Mic,
   FolderOpen,
   Clapperboard,
   Wand2,
   Layers,
-  ArrowUpRight,
-  Crown,
   Box,
   Film,
   PenTool,
@@ -119,127 +158,6 @@ import {
   Cloud,
   RefreshCw,
 } from "lucide-react";
-
-/* ===== Stand-ins for modules that were not uploaded (services/ and sub-components).
-   Replace each one with your real implementation when you have the file. ===== */
-const API_BASE = (typeof window !== "undefined" && window.PLOTCRAFT_API_BASE) ||
-  (typeof window !== "undefined" && window.location.hostname !== "localhost"
-    ? `${window.location.protocol}//${window.location.hostname}:5000`
-    : "http://localhost:5000");
-const TOKEN_KEY = "plotcraft_auth_token";
-const getToken = () => { try { return localStorage.getItem(TOKEN_KEY) || null; } catch { return null; } };
-const setToken = (token) => { try { if (token) localStorage.setItem(TOKEN_KEY, token); else localStorage.removeItem(TOKEN_KEY); } catch {} };
-const apiRequest = async (path, options = {}) => {
-  const headers = { ...(options.body && !(options.body instanceof Blob) ? { "Content-Type": "application/json" } : {}), ...(options.headers || {}) };
-  const token = getToken();
-  if (token) headers.Authorization = `Bearer ${token}`;
-  const response = await fetch(`${API_BASE}${path}`, { ...options, headers });
-  const data = options.raw ? response : await response.json().catch(() => ({}));
-  if (!response.ok) {
-    const err = new Error(data?.message || `Request failed (${response.status})`);
-    err.status = response.status;
-    throw err;
-  }
-  return data;
-};
-const waitForJob = async (path, jobId, onProgress, pagesKey = "pages") => {
-  let offset = 0;
-  for (let attempt = 0; attempt < 900; attempt++) {
-    const data = await apiRequest(`${path}/${encodeURIComponent(jobId)}${path.includes("stories/status") ? `?from=${offset}` : ""}`);
-    onProgress?.(data.message || "Working…");
-    if (data[pagesKey]?.length) offset += data[pagesKey].length;
-    if (data.status === "done") return data;
-    if (data.status === "error") {
-      const err = new Error(data.message || "Generation stopped.");
-      err.canContinue = path.includes("stories/status");
-      err.jobId = jobId;
-      err.pages = data.pages || [];
-      throw err;
-    }
-    await new Promise(resolve => setTimeout(resolve, 1800));
-  }
-  throw new Error("The job is taking longer than expected. Please check again.");
-};
-const generateStory = async (payload, { onProgress } = {}) => {
-  const start = await apiRequest("/api/stories/start", { method: "POST", body: JSON.stringify(payload) });
-  const allPages = [];
-  for (let attempt = 0; attempt < 900; attempt++) {
-    const status = await apiRequest(`/api/stories/status/${encodeURIComponent(start.jobId)}?from=${allPages.length}`);
-    onProgress?.(status.message || "Writing story…");
-    allPages.push(...(status.pages || []));
-    if (status.status === "done") return { jobId: start.jobId, pages: allPages };
-    if (status.status === "error") { const e = new Error(status.message || "Story generation stopped."); e.canContinue = true; e.jobId = start.jobId; e.pages = allPages; throw e; }
-    await new Promise(resolve => setTimeout(resolve, 1500));
-  }
-  const e = new Error("Story generation is still running. Continue in a moment."); e.canContinue = true; e.jobId = start.jobId; e.pages = allPages; throw e;
-};
-const continueStory = async (jobId, existingPages = [], { onProgress } = {}) => {
-  await apiRequest(`/api/stories/continue/${encodeURIComponent(jobId)}`, { method: "POST", body: "{}" });
-  const allPages = [...existingPages];
-  for (let attempt = 0; attempt < 900; attempt++) {
-    const status = await apiRequest(`/api/stories/status/${encodeURIComponent(jobId)}?from=${allPages.length}`);
-    onProgress?.(status.message || "Continuing story…");
-    allPages.push(...(status.pages || []));
-    if (status.status === "done") return { jobId, pages: allPages };
-    if (status.status === "error") { const e = new Error(status.message || "Story generation stopped."); e.canContinue = true; e.jobId = jobId; e.pages = allPages; throw e; }
-    await new Promise(resolve => setTimeout(resolve, 1500));
-  }
-  const e = new Error("Story is still running. Continue in a moment."); e.canContinue = true; e.jobId = jobId; e.pages = allPages; throw e;
-};
-const generateImageWithInfo = async (prompt, { style } = {}) => {
-  const data = await apiRequest("/api/generate-image", { method: "POST", body: JSON.stringify({ prompt, style }) });
-  return { imageUrl: data.imageUrl, provider: data.provider, style: data.style };
-};
-const generateVideo = async (prompt, { onProgress } = {}) => {
-  const start = await apiRequest("/api/generate-video", { method: "POST", body: JSON.stringify({ prompt }) });
-  for (let i = 0; i < 900; i++) {
-    const data = await apiRequest(`/api/video-status/${encodeURIComponent(start.jobId)}`);
-    onProgress?.(data.message || "Rendering video…");
-    if (data.status === "done" && data.videoUrl) return data.videoUrl;
-    if (data.status === "error") throw new Error(data.message || "Video generation failed.");
-    await new Promise(resolve => setTimeout(resolve, 2000));
-  }
-  throw new Error("Video generation is still running. Please try again shortly.");
-};
-const registerUser = async ({ name, email, password }) => {
-  const data = await apiRequest("/api/auth/register", { method: "POST", body: JSON.stringify({ name, email, password }) });
-  setToken(data.token); return data.user;
-};
-const loginUser = async ({ email, password }) => {
-  const data = await apiRequest("/api/auth/login", { method: "POST", body: JSON.stringify({ email, password }) });
-  setToken(data.token); return data.user;
-};
-const logoutUser = async () => { try { await apiRequest("/api/auth/logout", { method: "POST", body: "{}" }); } finally { setToken(null); } };
-const fetchMe = async () => { if (!getToken()) return null; try { const data = await apiRequest("/api/auth/me"); return data.user || null; } catch { setToken(null); return null; } };
-const stopSpeaking = () => { try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (e) {} };
-
-/* Built-in help answers, used when no chat server is configured (API_BASE). */
-function localReply(q) {
-  const t = (q || "").toLowerCase();
-  if (/^(hi|hello|hey|hai|namaste|hyy?)\b/.test(t)) return "Hi! Nenu PlotCraft AI assistant. Story, image, video, ya studio lo em help kavali?";
-  if (/story|katha|kathalu|plot/.test(t)) return "Story kosam: Story tab open cheyyandi, genre and characters select cheyyandi, tarvata Generate click cheyyandi.";
-  if (/video/.test(t)) return "Video kosam: Video tab open cheyyandi, prompt rayandi, duration select cheyyandi, tarvata Generate. Login avasaram.";
-  if (/image|photo|picture|prompt/.test(t)) return "Image kosam: Image tab lo subject, style, lighting, background details ivvandi. Detailed prompt tho results baguntayi.";
-  if (/studio|edit|animation|theme|font|icon/.test(t)) return "Studio lo Art, Characters, Animate, Video, Design, Write, Learn categories unnayi. Theme picker lo mee nachina style select cheyyochu.";
-  if (/feature|enti|em undi|what can/.test(t)) return "Ee app lo Story generation, Image/Video creation, PlotCraft Pro studio, games, Drawing studio, mariyu profile unnayi.";
-  if (/login|sign|account/.test(t)) return "Login / Sign Up sidebar lo undi. Login ayyaka image/video lantivi use cheyyochu.";
-  return "Nakku ee question ki exact answer ledu. Story, image, video, studio, ya login gurinchi inka clear ga adagandi, nenu help chestaanu.";
-}
-
-/* chat + image + saved-chat services (stand-ins until services/openai and services/api are added) */
-const chatAI = async ({ messages = [], file } = {}) => {
-  const data = await apiRequest("/api/chat", { method: "POST", body: JSON.stringify({ messages, file }) });
-  return data.reply || "The assistant returned an empty response.";
-};
-const generateImage = async (prompt) => {
-  const data = await apiRequest("/api/generate-image", { method: "POST", body: JSON.stringify({ prompt }) });
-  if (!data.imageUrl) throw new Error("The image engine returned no image.");
-  return data.imageUrl;
-};
-const listChats = async () => { const data = await apiRequest("/api/chats"); return data.chats || []; };
-const getChat = async (id) => { const data = await apiRequest(`/api/chats/${encodeURIComponent(id)}`); return data.chat || null; };
-const saveChat = async (id, messages) => apiRequest(`/api/chats/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify({ messages }) });
-const deleteChat = async (id) => apiRequest(`/api/chats/${encodeURIComponent(id)}`, { method: "DELETE" });
 
 const Placeholder = ({ title, icon }) => (
   <div className="pc-fade-up" style={{ padding: 28, textAlign: "center", opacity: 0.85 }}>
@@ -536,9 +454,11 @@ const chatTitle = (messages) => {
 // generated pictures are big, so only the text of an image message is saved
 const stripImages = (messages) => messages.map(({ imageUrl, ...rest }) => rest);
 
-function AiSearch({ currentStyle, currentUser }) {
+function AiSearch({ currentStyle, currentUser, initialPrompt = "", autoRun = false, initialVoiceReplies = false }) {
   const [messages, setMessages] = useState([]);
-  const [input, setInput] = useState("");
+  const [input, setInput] = useState(initialPrompt);
+  const [voiceReplies, setVoiceReplies] = useState(initialVoiceReplies);
+  const [voiceError, setVoiceError] = useState("");
   const [imageMode, setImageMode] = useState(false);
   const [file, setFile] = useState(null);
   const [loading, setLoading] = useState(null); // null | "chat" | "image"
@@ -546,6 +466,16 @@ function AiSearch({ currentStyle, currentUser }) {
   const [copiedId, setCopiedId] = useState(null);
   const fileInputRef = useRef(null);
   const endRef = useRef(null);
+  const autoSentRef = useRef(false);
+  const voiceRepliesRef = useRef(initialVoiceReplies);
+
+  useEffect(() => {
+    voiceRepliesRef.current = voiceReplies;
+  }, [voiceReplies]);
+
+  useEffect(() => () => {
+    if (voiceRepliesRef.current) stopSpeaking();
+  }, []);
 
   // ----- saved chats -----
   const [chatId, setChatId] = useState(newChatId);
@@ -706,6 +636,12 @@ function AiSearch({ currentStyle, currentUser }) {
       });
       const parsed = parseVerdict(raw);
       add({ role: "assistant", kind: "text", raw, ask: text, ...parsed, content: parsed.body });
+      if (voiceRepliesRef.current) {
+        setVoiceError("");
+        speakText(parsed.body, {
+          onMissingVoice: (languages) => setVoiceError(`No installed voice for ${languages.join(", ")}. Add a voice in your device settings to hear replies.`),
+        });
+      }
     } catch (err) {
       add({
         role: "assistant",
@@ -737,6 +673,12 @@ function AiSearch({ currentStyle, currentUser }) {
       runChat(text, attached);
     }
   };
+
+  useEffect(() => {
+    if (!autoRun || !initialPrompt.trim() || autoSentRef.current) return;
+    autoSentRef.current = true;
+    send(initialPrompt);
+  }, [autoRun, initialPrompt, send]);
 
   const copyText = async (m) => {
     try {
@@ -870,6 +812,23 @@ function AiSearch({ currentStyle, currentUser }) {
             className={`px-4 py-2 rounded-full text-xs font-bold flex items-center gap-1.5 cursor-pointer hover:scale-[1.03] transition ${currentStyle.btnSecondary}`}
           >
             <Plus className="w-3.5 h-3.5" /> New chat
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              const enabled = !voiceReplies;
+              if (!enabled) stopSpeaking();
+              voiceRepliesRef.current = enabled;
+              setVoiceReplies(enabled);
+              setVoiceError("");
+            }}
+            disabled={!isSpeechSupported()}
+            aria-pressed={voiceReplies}
+            title={isSpeechSupported() ? "Automatically read AI Chat replies aloud" : "Spoken replies are not supported in this browser"}
+            className={`px-3 py-2 rounded-full text-xs font-bold flex items-center gap-1.5 cursor-pointer transition disabled:cursor-not-allowed disabled:opacity-40 ${currentStyle.btnSecondary}`}
+          >
+            {voiceReplies ? <Volume2 className="w-3.5 h-3.5" /> : <VolumeX className="w-3.5 h-3.5" />}
+            <span className="hidden sm:inline">Voice {voiceReplies ? "on" : "off"}</span>
           </button>
         </div>
       </div>
@@ -1084,6 +1043,16 @@ function AiSearch({ currentStyle, currentUser }) {
               <ImageIcon className="w-4 h-4" />
               <span className="hidden sm:inline">Create image</span>
             </button>
+            <VoiceInputButton
+              onTranscript={(transcript) => {
+                setInput((current) => [current.trim(), transcript].filter(Boolean).join(" "));
+                voiceRepliesRef.current = true;
+                setVoiceReplies(true);
+                setVoiceError("");
+              }}
+              className="shrink-0"
+              compact
+            />
             <textarea
               value={input}
               onChange={(e) => setInput(e.target.value)}
@@ -1113,6 +1082,7 @@ function AiSearch({ currentStyle, currentUser }) {
               {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
             </button>
           </div>
+          {voiceError && <p role="status" className="text-center text-[11px] text-amber-500">{voiceError}</p>}
           <p className="text-[10px] text-center opacity-50">
             Story checks come from the AI's knowledge and can be wrong. Treat them as a strong hint, not proof.
           </p>
@@ -1125,592 +1095,6 @@ function AiSearch({ currentStyle, currentUser }) {
   );
 }
 
-const fetchStats = async () => (await apiRequest("/api/stats")).stats;
-
-const useAboutCountUp = (target, run) => {
-  const [value, setValue] = useState(0);
-  useEffect(() => {
-    if (!run || target == null) return;
-    const reduce = typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-    if (reduce) { setValue(target); return; }
-    const start = performance.now();
-    const duration = 1400;
-    let raf;
-    const tick = (now) => {
-      const t = Math.min(1, (now - start) / duration);
-      setValue(target * (1 - Math.pow(1 - t, 4))); // ease-out
-      if (t < 1) raf = requestAnimationFrame(tick);
-    };
-    raf = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(raf);
-  }, [target, run]);
-  return value;
-};
-
-function AboutStat({ label, value, decimals = 0, run }) {
-  const v = useAboutCountUp(value, run);
-  return (
-    <div className="group relative text-center p-5 rounded-3xl bg-white/5 dark:bg-black/20 border border-white/10 dark:border-white/5 backdrop-blur-xl hover:-translate-y-1.5 hover:shadow-2xl hover:shadow-purple-500/10 hover:border-purple-500/30 transition-all duration-500">
-      <div className="absolute inset-0 rounded-3xl bg-gradient-to-br from-purple-500/5 to-pink-500/5 opacity-0 group-hover:opacity-100 transition-opacity duration-500 pointer-events-none" />
-      <p className="text-3xl md:text-4xl font-black bg-gradient-to-r from-purple-400 via-pink-500 to-indigo-500 bg-clip-text text-transparent tracking-tight">
-        {value == null ? "—" : v.toFixed(decimals)}
-      </p>
-      <p className="text-[11px] font-semibold opacity-70 mt-1.5 uppercase tracking-wider">{label}</p>
-    </div>
-  );
-}
-
-const ABOUT_FEATURES = [
-  {
-    id: "story",
-    icon: BookOpen,
-    title: "Story & Writing",
-    text: "Give a title and a hero's name, pick a genre, and get a complete story. Open it as a full page, listen to it, or download it.",
-    tip: "Try: 'The Clever Rabbit and the Lion' with the hero 'Felix'.",
-  },
-  {
-    id: "chat",
-    icon: MessageSquare,
-    title: "AI Chat & Story Check",
-    text: "Paste a story or idea and PlotChat tells you whether it already exists or is original. It can also review files for errors. Every chat is saved to your account.",
-    tip: "Try: 'Is Cinderella an original story?'",
-  },
-  {
-    id: "image",
-    icon: ImageIcon,
-    title: "AI Image Generator",
-    text: "Turn a scene into a storybook-style picture in 2D or 3D style, then download it.",
-    tip: "Describe the scene in one or two sentences.",
-  },
-  {
-    id: "video",
-    icon: Video,
-    title: "AI Video Generator",
-    text: "Describe a scene and get a short AI video clip that plays right here. Free video engines can be busy, so a render can take a few minutes.",
-    tip: "Short clips take a minute or two when the engines are free.",
-  },
-  {
-    id: "projects",
-    icon: FolderOpen,
-    title: "Projects",
-    text: "Keep your work in one place. Rename, duplicate, share with a link, or move to Trash. Trashed projects stay for 30 days before they are deleted for good. Notes autosave as you type.",
-    tip: "Workspace → Projects in the sidebar.",
-  },
-  {
-    id: "templates",
-    icon: LayoutGrid,
-    title: "Templates",
-    text: "Start from ready-made layouts for Instagram posts, posters, banners and flyers, or from a story chapter outline. Using one creates a new project for you.",
-    tip: "Create → Templates in the sidebar.",
-  },
-  {
-    id: "voice",
-    icon: Volume2,
-    title: "Read Aloud",
-    text: "Every story and answer can be read aloud in any language your device has a voice for, including mixed English and Telugu.",
-    tip: "Tap the Read aloud button under any answer.",
-  },
-  {
-    id: "community",
-    icon: Users,
-    title: "Community",
-    text: "Publish your projects to the community feed, get likes and comments, and climb the creator leaderboard.",
-    tip: "Community → Community Feed in the sidebar.",
-  },
-  {
-    id: "themes",
-    icon: Palette,
-    title: "Themes & Dream Mode",
-    text: "Eight moods, each with its own look, plus a soft Dream Mode that changes the layout and moves the logo.",
-    tip: "Pick a theme from Appearance & Theme at the bottom of the sidebar.",
-  },
-  {
-    id: "search",
-    icon: Search,
-    title: "Search & Favorites",
-    text: "Can't find a tool? Type in the 'Search tools...' box at the top of the sidebar. Star the tools you use most and they stay at the top.",
-    tip: "Try typing 'video' in the search box.",
-  },
-];
-
-const ABOUT_FAQ = [
-  { q: "Is PlotCraft free?", a: "Yes. Free accounts get a daily AI limit (20 AI generations per day by default). The free AI engines also get busy at times, so heavy use may need to wait a little." },
-  { q: "Are my chats and projects private?", a: "Yes. Chats and projects belong to your account and only you can open them. A project is visible to others only if you share its link or publish it to the Community." },
-  { q: "Can the AI be wrong about whether a story already exists?", a: "Yes. It checks using what it knows, so treat the answer as a strong hint, not proof." },
-  { q: "Why do I need an account?", a: "To save chats and projects across devices, create images and videos, publish to the Community, and leave a review." },
-];
-
-function AboutPage({ currentStyle }) {
-  const [active, setActive] = useState("story");
-  const [open, setOpen] = useState(0);
-  const [stats, setStats] = useState(undefined); // undefined = loading, null = failed
-  const [inView, setInView] = useState(false);
-  const statsRef = useRef(null);
-
-  useEffect(() => {
-    let alive = true;
-    fetchStats().then((s) => alive && setStats(s)).catch(() => alive && setStats(null));
-    return () => { alive = false; };
-  }, []);
-
-  useEffect(() => {
-    const el = statsRef.current;
-    if (!el || typeof IntersectionObserver === "undefined") {
-      setInView(true);
-      return;
-    }
-    const io = new IntersectionObserver(([e]) => e.isIntersecting && setInView(true), { threshold: 0.2 });
-    io.observe(el);
-    return () => io.disconnect();
-  }, []);
-
-  const feature = ABOUT_FEATURES.find((f) => f.id === active) || ABOUT_FEATURES[0];
-  const FIcon = feature.icon;
-  const num = (key) => (stats && typeof stats[key] === "number" ? stats[key] : null);
-
-  return (
-    <div className="max-w-4xl mx-auto w-full space-y-8 pb-12">
-      <style>{`
-        @keyframes aboutSlideUp { 0% { opacity: 0; transform: translateY(24px) scale(0.98); } 100% { opacity: 1; transform: translateY(0) scale(1); } }
-        @keyframes aboutFade { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
-        @keyframes aboutFloat { 0%, 100% { transform: translateY(0px) rotate(0deg); } 50% { transform: translateY(-10px) rotate(1deg); } }
-        @keyframes aboutGlow { 0%, 100% { opacity: 0.3; transform: scale(1); } 50% { opacity: 0.6; transform: scale(1.08); } }
-        .about-slide { animation: aboutSlideUp 0.8s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
-        .about-float { animation: aboutFloat 6s ease-in-out infinite; }
-        .about-glow { animation: aboutGlow 7s ease-in-out infinite; }
-        @media (prefers-reduced-motion: reduce) {
-          .about-slide, .about-float, .about-glow { animation: none !important; }
-        }
-      `}</style>
-
-      {/* Hero */}
-      <section className={`relative overflow-hidden p-8 md:p-14 rounded-[2.5rem] text-center ${currentStyle.bgCard} border border-white/10 shadow-2xl backdrop-blur-2xl about-slide`}>
-        <div className="absolute -top-24 -left-20 w-72 h-72 rounded-full bg-purple-500/30 blur-[90px] about-glow pointer-events-none" />
-        <div className="absolute -bottom-28 -right-16 w-80 h-80 rounded-full bg-pink-500/30 blur-[90px] about-glow pointer-events-none" style={{ animationDelay: "2.5s" }} />
-
-        <div className="relative space-y-6 z-10">
-          <div className="flex justify-center">
-            <div className="about-float p-3 rounded-3xl bg-white/5 border border-white/10 shadow-xl backdrop-blur-md">
-              <PlotCraftLogo size={76} />
-            </div>
-          </div>
-
-          <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-purple-500/10 border border-purple-500/20 text-purple-400 text-xs font-bold tracking-wide uppercase shadow-sm">
-            <Sparkles className="w-3.5 h-3.5 animate-spin" style={{ animationDuration: "4s" }} />
-            AI Storytelling & Media Studio
-          </div>
-
-          <h2 className="text-3xl md:text-5xl font-black tracking-tight leading-tight">
-            Where every <span className={currentStyle.logoTheme}>story</span> comes alive
-          </h2>
-
-          <p className="text-sm md:text-base opacity-75 max-w-xl mx-auto leading-relaxed font-medium">
-            PlotCraft helps students, teachers, parents and young storytellers write stories, check originality,
-            turn scenes into pictures and videos, and organize their work in projects.
-          </p>
-        </div>
-      </section>
-
-      {/* Real numbers from the server */}
-      <section ref={statsRef} className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <AboutStat label="Stories written" value={num("stories")} run={inView} />
-        <AboutStat label="Creators" value={num("creators")} run={inView} />
-        <AboutStat label="Chats saved" value={num("chats")} run={inView} />
-        <AboutStat label="Average rating" value={num("rating")} decimals={1} run={inView} />
-      </section>
-      <p className="text-center text-[11px] opacity-50 -mt-2">
-        {stats === undefined && "Live statistics loading..."}
-        {stats === null && "Statistics abhi load avvaledu. Konchem tarvata try cheyyandi."}
-        {stats && `${stats.reviews ?? 0} reviews · numbers are live from the server`}
-      </p>
-
-      {/* Feature explorer */}
-      <section className={`p-6 md:p-10 rounded-[2.5rem] ${currentStyle.bgCard} border border-white/10 shadow-xl backdrop-blur-xl space-y-6 about-slide`} style={{ animationDelay: "0.15s" }}>
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-2">
-          <h3 className="font-extrabold text-lg tracking-tight flex items-center gap-2">
-            <span className="w-2.5 h-2.5 rounded-full bg-purple-500 animate-ping" />
-            Explore what you can do
-          </h3>
-          <span className="text-xs opacity-50 font-medium">Click a feature to learn more</span>
-        </div>
-
-        <div className="flex flex-wrap gap-2.5">
-          {ABOUT_FEATURES.map((f) => {
-            const Icon = f.icon;
-            const isActive = active === f.id;
-            return (
-              <button
-                key={f.id}
-                type="button"
-                aria-pressed={isActive}
-                onClick={() => setActive(f.id)}
-                className={`px-4 py-2.5 rounded-2xl text-xs font-bold flex items-center gap-2 cursor-pointer transition-all duration-300 ${
-                  isActive
-                    ? "bg-gradient-to-r from-purple-600 to-pink-600 text-white shadow-lg shadow-purple-500/25 scale-105 border border-purple-400/30"
-                    : `${currentStyle.btnSecondary} hover:scale-[1.02] border border-transparent`
-                }`}
-              >
-                <Icon className={`w-4 h-4 ${isActive ? "text-white" : "opacity-70"}`} />
-                {f.title}
-              </button>
-            );
-          })}
-        </div>
-
-        <div key={feature.id} className="p-6 rounded-3xl bg-black/10 dark:bg-black/30 border border-white/5 flex flex-col md:flex-row gap-5 items-start animate-[aboutFade_0.4s_cubic-bezier(0.16,1,0.3,1)]">
-          <div className="p-4 rounded-2xl bg-gradient-to-tr from-purple-600 via-fuchsia-600 to-pink-600 text-white shadow-lg shadow-purple-600/30 shrink-0">
-            <FIcon className="w-6 h-6" />
-          </div>
-          <div className="space-y-2.5">
-            <h4 className="font-extrabold text-base tracking-wide text-purple-400 dark:text-purple-300">{feature.title}</h4>
-            <p className="text-xs md:text-sm leading-relaxed opacity-85 font-normal">{feature.text}</p>
-            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-xl bg-purple-500/10 border border-purple-500/20 text-purple-400 text-[11px] font-semibold">
-              <Sparkles className="w-3 h-3" /> {feature.tip}
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* FAQ */}
-      <section className={`p-6 md:p-10 rounded-[2.5rem] ${currentStyle.bgCard} border border-white/10 shadow-xl backdrop-blur-xl space-y-4 about-slide`} style={{ animationDelay: "0.3s" }}>
-        <h3 className="font-extrabold text-lg tracking-tight mb-4">Frequently Asked Questions</h3>
-        <div className="space-y-3">
-          {ABOUT_FAQ.map((item, i) => {
-            const isOpen = open === i;
-            return (
-              <div key={item.q} className={`rounded-2xl border transition-all duration-300 overflow-hidden ${isOpen ? "bg-white/10 dark:bg-white/5 border-purple-500/30 shadow-lg" : "bg-black/5 border-white/5 hover:border-white/10"}`}>
-                <button
-                  type="button"
-                  aria-expanded={isOpen}
-                  onClick={() => setOpen(isOpen ? -1 : i)}
-                  className="w-full flex items-center justify-between gap-4 text-left px-5 py-4 text-xs md:text-sm font-bold cursor-pointer transition-colors"
-                >
-                  <span className="tracking-tight">{item.q}</span>
-                  <div className={`p-1.5 rounded-full bg-white/10 transition-transform duration-300 ${isOpen ? "rotate-180 bg-purple-500 text-white" : ""}`}>
-                    <ChevronDown className="w-3.5 h-3.5 shrink-0" />
-                  </div>
-                </button>
-                <div className={`grid transition-all duration-300 ease-in-out ${isOpen ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0"}`}>
-                  <div className="overflow-hidden">
-                    <p className="px-5 pb-5 text-xs md:text-sm opacity-75 leading-relaxed font-normal">{item.a}</p>
-                  </div>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </section>
-
-      {/* Footer card */}
-      <section className={`p-6 rounded-[2rem] ${currentStyle.bgCard} border border-white/10 shadow-lg flex flex-wrap items-center justify-between gap-4 text-xs font-medium backdrop-blur-xl about-slide`} style={{ animationDelay: "0.45s" }}>
-        <span className="flex items-center gap-2.5">
-          <span className="p-2 rounded-xl bg-pink-500/10 text-pink-500">
-            <Heart className="w-4 h-4 fill-pink-500" />
-          </span>
-          Designed and developed with passion by <strong className="font-bold tracking-wide">K.Ganesh</strong>
-        </span>
-        <span className="px-3.5 py-1.5 rounded-full bg-yellow-400/10 border border-yellow-400/20 text-yellow-500 font-bold flex items-center gap-1.5 shadow-sm">
-          <Star className="w-3.5 h-3.5 fill-yellow-400" /> Version 4.0
-        </span>
-      </section>
-    </div>
-  );
-}
-
-const USAGE_STEPS = [
-  { id: "01", icon: BookOpenCheck, title: "Story & Writing", tagline: "Create epic tales instantly!", text: "Sidebar → Create → Story & Writing. Enter a title and hero name, choose a genre, and click Generate Story. Read the full page, listen to it, or download it.", gradient: "from-pink-500 via-rose-500 to-orange-500", glowColor: "group-hover:shadow-[0_0_35px_rgba(244,63,94,0.4)]", badge: "Most Popular" },
-  { id: "02", icon: Bot, title: "AI Chat Assistant", tagline: "Smart chat & file analysis", text: "Sidebar → AI Tools → AI Chat. Check whether your story idea is original or inspired, ask complex questions, or attach code files to find bugs.", gradient: "from-purple-600 via-indigo-600 to-blue-500", glowColor: "group-hover:shadow-[0_0_35px_rgba(147,51,234,0.4)]", badge: "Super Smart" },
-  { id: "03", icon: Cloud, title: "Auto-Saved Chats", tagline: "Never lose your thoughts", text: "Every conversation is saved. Log in and your chats sync to all your devices. Open old chats anytime from the chat list.", gradient: "from-emerald-500 via-teal-600 to-cyan-500", glowColor: "group-hover:shadow-[0_0_35px_rgba(20,184,166,0.4)]", badge: "Secure" },
-  { id: "04", icon: Volume2, title: "Read Aloud Voice", tagline: "Listen to your stories", text: "Click the Read Aloud button under any story or answer. It speaks in the language of the text, handling mixed English and Telugu smoothly.", gradient: "from-amber-500 via-yellow-500 to-lime-500", glowColor: "group-hover:shadow-[0_0_35px_rgba(245,158,11,0.4)]", badge: "Audio FX" },
-  { id: "05", icon: Wand2, title: "Image & AI Video", tagline: "Bring imagination to life", text: "Sidebar → AI Tools → AI Image Generator or AI Video Generator. Sign in and describe a scene. Generation can take a minute or two.", gradient: "from-cyan-500 via-sky-600 to-blue-600", glowColor: "group-hover:shadow-[0_0_35px_rgba(6,182,212,0.4)]", badge: "Creative" },
-  { id: "06", icon: FolderOpen, title: "Projects & Templates", tagline: "Keep your work organized", text: "Workspace → Projects keeps your work in one place: rename, duplicate, share with a link, or move to Trash (kept 30 days). Create → Templates gives you ready-made layouts to start from.", gradient: "from-indigo-500 via-violet-600 to-purple-600", glowColor: "group-hover:shadow-[0_0_35px_rgba(99,102,241,0.4)]", badge: "Workspace" },
-  { id: "07", icon: Search, title: "Search & Favorites", tagline: "Find any tool in seconds", text: "Type in 'Search tools...' at the top of the sidebar, for example 'video'. Star the tools you use most and they stay at the top of the sidebar.", gradient: "from-sky-500 via-cyan-600 to-teal-500", glowColor: "group-hover:shadow-[0_0_35px_rgba(14,165,233,0.4)]", badge: "Power User" },
-  { id: "08", icon: Palette, title: "Themes & Dream Mode", tagline: "Customize your vibe", text: "Pick a theme from Appearance & Theme at the bottom of the sidebar. Turn on Dream Mode for a soft, immersive layout.", gradient: "from-fuchsia-500 via-pink-600 to-rose-600", glowColor: "group-hover:shadow-[0_0_35px_rgba(217,70,239,0.4)]", badge: "Aesthetic" },
-  { id: "09", icon: Star, title: "Community & Ratings", tagline: "Share your work and your love", text: "Community → Community Feed shows published projects. Community → Top Rated lets you leave a rating after you log in. Your review and story count are shown to visitors.", gradient: "from-yellow-400 via-amber-500 to-orange-500", glowColor: "group-hover:shadow-[0_0_35px_rgba(251,191,36,0.4)]", badge: "Community" }
-];
-
-
-function UsagePage({ currentStyle }) {
-  const [clickedCard, setClickedCard] = useState(null);
-
-  const isLightMode = 
-    !currentStyle?.bgMain?.includes("slate-950") && 
-    !currentStyle?.bgMain?.includes("black") && 
-    !currentStyle?.bgMain?.includes("emerald") && 
-    !currentStyle?.bgMain?.includes("blue") && 
-    !currentStyle?.bgMain?.includes("slate-900") &&
-    !currentStyle?.bgMain?.includes("indigo");
-
-  const cardRefs = useRef([]);
-
-  useEffect(() => {
-    const cards = cardRefs.current.filter(Boolean);
-    if (!cards.length) return;
-
-    // Find the actual scrolling container used by AiDashboard.
-    // UsagePage itself is not the scroller; AiDashboard uses overflow-y-auto.
-    const findScrollParent = (element) => {
-      let parent = element?.parentElement;
-
-      while (parent) {
-        const style = window.getComputedStyle(parent);
-        const canScroll =
-          /(auto|scroll)/.test(style.overflowY) &&
-          parent.scrollHeight > parent.clientHeight;
-
-        if (canScroll) return parent;
-        parent = parent.parentElement;
-      }
-
-      return window;
-    };
-
-    const scrollParent = findScrollParent(cards[0]);
-    let ticking = false;
-
-    const revealCards = () => {
-      const viewportTop =
-        scrollParent === window
-          ? 0
-          : scrollParent.getBoundingClientRect().top;
-
-      const viewportBottom =
-        scrollParent === window
-          ? window.innerHeight
-          : scrollParent.getBoundingClientRect().bottom;
-
-      cards.forEach((card) => {
-        if (card.classList.contains("usage-card-visible")) return;
-
-        const rect = card.getBoundingClientRect();
-        const visibleTop = Math.max(rect.top, viewportTop);
-        const visibleBottom = Math.min(rect.bottom, viewportBottom);
-        const visibleHeight = visibleBottom - visibleTop;
-
-        // Trigger when a meaningful portion of the card enters the scroll area.
-        if (visibleHeight >= Math.min(100, rect.height * 0.18)) {
-          card.classList.add("usage-card-visible");
-        }
-      });
-
-      ticking = false;
-    };
-
-    const onScroll = () => {
-      if (!ticking) {
-        window.requestAnimationFrame(revealCards);
-        ticking = true;
-      }
-    };
-
-    // Reveal the first visible cards immediately.
-    revealCards();
-
-    scrollParent.addEventListener("scroll", onScroll, { passive: true });
-    window.addEventListener("resize", onScroll, { passive: true });
-
-    return () => {
-      scrollParent.removeEventListener("scroll", onScroll);
-      window.removeEventListener("resize", onScroll);
-      ticking = false;
-    };
-  }, [currentStyle?.bgMain]);
-
-
-
-  return (
-    <div className={`w-full max-w-6xl mx-auto p-4 sm:p-6 md:p-10 space-y-8 relative overflow-hidden ${isLightMode ? "text-slate-950" : "text-white"}`}>
-      <style>{`
-        .usage-card {
-          opacity: 0;
-          transform: translate3d(0, 70px, 0) scale(0.82);
-          filter: blur(5px);
-          transition:
-            opacity 1050ms cubic-bezier(0.16, 1, 0.3, 1),
-            transform 1050ms cubic-bezier(0.16, 1, 0.3, 1),
-            filter 1050ms cubic-bezier(0.16, 1, 0.3, 1);
-          will-change: opacity, transform, filter;
-        }
-
-        .usage-card-visible {
-          opacity: 1;
-          transform: translate3d(0, 0, 0) scale(1);
-          filter: blur(0);
-        }
-
-        .usage-card:hover {
-          transform: translate3d(0, -7px, 0) scale(1.015);
-        }
-
-        .usage-header {
-          animation: usageHeaderIn 850ms cubic-bezier(0.22, 1, 0.36, 1) both;
-        }
-
-        .usage-footer {
-          animation: usageFooterIn 900ms cubic-bezier(0.22, 1, 0.36, 1) 250ms both;
-        }
-
-        @keyframes usageHeaderIn {
-          from {
-            opacity: 0;
-            transform: translate3d(0, -24px, 0) scale(0.98);
-          }
-          to {
-            opacity: 1;
-            transform: translate3d(0, 0, 0) scale(1);
-          }
-        }
-
-        @keyframes usageFooterIn {
-          from {
-            opacity: 0;
-            transform: translate3d(0, 35px, 0) scale(0.96);
-          }
-          to {
-            opacity: 1;
-            transform: translate3d(0, 0, 0) scale(1);
-          }
-        }
-
-        @media (prefers-reduced-motion: reduce) {
-          .usage-card,
-          .usage-header,
-          .usage-footer {
-            animation: none !important;
-            transition: none !important;
-            opacity: 1 !important;
-            transform: none !important;
-            filter: none !important;
-          }
-        }
-      `}</style>
-      
-      {/* Header Banner */}
-      <div className={`usage-header relative overflow-hidden rounded-[2.5rem] p-8 md:p-12 ${currentStyle?.bgCard || 'bg-slate-900/90'} border ${isLightMode ? 'border-slate-300 shadow-xl bg-white text-slate-900' : 'border-white/20 shadow-2xl text-white'} backdrop-blur-xl`}>
-        {/* Background Glows */}
-        <div className="absolute -top-24 -right-24 w-96 h-96 bg-purple-600/20 rounded-full blur-3xl pointer-events-none"></div>
-        <div className="absolute -bottom-24 -left-24 w-96 h-96 bg-pink-600/20 rounded-full blur-3xl pointer-events-none"></div>
-        
-        <div className="relative z-10 flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
-          <div className="space-y-3">
-            <div className={`inline-flex items-center gap-2 px-4 py-1.5 rounded-full ${isLightMode ? 'bg-purple-100 border border-purple-300 text-purple-900' : 'bg-purple-500/20 border border-purple-400/40 text-purple-200'} text-xs font-black tracking-wide shadow-sm`}>
-              <Sparkles className="w-4 h-4 text-pink-400 animate-pulse" /> PlotCraft Guide & Masterclass
-            </div>
-            
-            {/* New Color Theme Text */}
-            <h1 className={`text-3xl md:text-5xl font-black tracking-tight ${isLightMode ? 'text-slate-900' : 'text-white'}`}>
-              How to Use <span className="bg-gradient-to-r from-pink-400 via-fuchsia-400 to-indigo-400 bg-clip-text text-transparent">PlotCraft</span>
-            </h1>
-            
-            <p className={`text-sm md:text-base ${isLightMode ? 'text-slate-700 font-bold' : 'text-slate-300 font-medium'} max-w-2xl leading-relaxed`}>
-              Discover how to easily master all features to build incredible stories, generate stunning AI images, and produce cinematic videos!
-            </p>
-          </div>
-
-          <div className="flex flex-col sm:flex-row items-center gap-3">
-            <div className={`flex items-center gap-3 ${isLightMode ? 'bg-slate-100 border border-slate-300 shadow-md text-slate-900' : 'bg-black/40 border border-white/20 shadow-xl text-white'} p-4 rounded-2xl backdrop-blur-md`}>
-              <div className="p-3 rounded-xl bg-gradient-to-tr from-pink-500 to-purple-600 text-white shadow-lg">
-                <Compass className="w-6 h-6 animate-spin" style={{ animationDuration: "15s" }} />
-              </div>
-              <div>
-                <div className={`text-xs ${isLightMode ? 'text-purple-700 font-black' : 'text-pink-300 font-bold'}`}>Total Steps</div>
-                <div className={`text-lg font-black ${isLightMode ? 'text-slate-900' : 'text-amber-300'}`}>{String(USAGE_STEPS.length).padStart(2, "0")} Super Features</div>
-              </div>
-            </div>
-
-            {/* Smooth Experience Badge */}
-            <div className={`px-5 py-4 rounded-2xl flex items-center gap-2.5 ${
-              isLightMode
-                ? "bg-white border border-slate-300 text-purple-800 shadow-md"
-                : "bg-white/10 border border-white/20 text-white shadow-xl"
-            } backdrop-blur-md`}>
-              <Sparkles className="w-5 h-5 text-pink-400 animate-pulse" />
-              <span className="text-xs font-black uppercase tracking-wider">
-                Smooth Guide
-              </span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Grid Layout Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {USAGE_STEPS.map((step, idx) => {
-          const IconComponent = step.icon;
-          const isFeatured = idx === 0;
-          const isSelected = clickedCard === step.title;
-
-          return (
-            <div 
-              ref={(el) => {
-                cardRefs.current[idx] = el;
-              }}
-              key={step.title}
-              onClick={() => setClickedCard(step.title)}
-              style={{ transitionDelay: `${idx * 110}ms` }}
-              className={`usage-card group relative rounded-[2.2rem] p-7 ${currentStyle?.bgCard || 'bg-slate-900/70'} border ${isLightMode ? 'border-slate-300 hover:border-purple-600 shadow-lg bg-white text-slate-900' : 'border-white/15 hover:border-pink-500/50 shadow-xl text-white'} transition-[border-color,box-shadow] duration-300 flex flex-col justify-between cursor-pointer ${step.glowColor} ${isFeatured ? 'lg:col-span-2' : ''} ${isSelected ? 'ring-2 ring-pink-500 shadow-[0_0_30px_rgba(236,72,153,0.3)]' : ''}`}
-            >
-              {/* Top Row: Icon + Badge */}
-              <div className="space-y-5">
-                <div className="flex items-center justify-between">
-                  <div className={`p-4 rounded-2xl bg-gradient-to-r ${step.gradient} text-white shadow-xl transform group-hover:scale-110 group-hover:rotate-3 transition-transform duration-300`}>
-                    <IconComponent className="w-6 h-6" />
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className={`px-3 py-1 rounded-full ${isLightMode ? 'bg-slate-100 border border-slate-300 text-slate-900' : 'bg-white/10 border border-white/20 text-amber-300'} text-xs font-black shadow-sm`}>
-                      {step.id}
-                    </span>
-                    <span className={`px-3 py-1 rounded-full ${isLightMode ? 'bg-purple-100 border border-purple-200 text-purple-900' : 'bg-gradient-to-r from-pink-500/20 to-purple-500/20 border border-pink-400/30 text-pink-300'} text-[11px] font-black`}>
-                      {step.badge}
-                    </span>
-                  </div>
-                </div>
-
-                {/* Title & Tagline with updated vibrant colors */}
-                <div className="space-y-1.5">
-                  <h3 className={`text-lg md:text-xl font-black ${isLightMode ? 'text-slate-950' : 'text-white'} group-hover:text-pink-400 transition-colors duration-300`}>
-                    {step.title}
-                  </h3>
-                  <p className={`text-xs font-black ${isLightMode ? 'text-purple-800' : 'text-pink-300'} tracking-wider uppercase`}>
-                    {step.tagline}
-                  </p>
-                </div>
-
-                {/* Description */}
-                <p className={`text-xs md:text-sm ${isLightMode ? 'text-slate-800 font-semibold' : 'text-slate-200 font-medium'} leading-relaxed`}>
-                  {step.text}
-                </p>
-              </div>
-
-              {/* Bottom Footer */}
-              <div className={`pt-6 mt-6 border-t ${isLightMode ? 'border-slate-200 text-slate-600' : 'border-white/10 text-slate-400'} flex items-center justify-between text-xs transition-colors`}>
-                <span className={`flex items-center gap-1.5 font-black ${isLightMode ? 'text-purple-800' : 'text-amber-300'}`}>
-                  <Zap className={`w-3.5 h-3.5 ${isLightMode ? 'text-purple-600' : 'text-amber-400 fill-amber-400'}`} /> Tap to interact
-                </span>
-                <span className={`flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity transform translate-x-[-10px] group-hover:translate-x-0 duration-300 ${isLightMode ? 'text-purple-800 font-black' : 'text-pink-400 font-black'}`}>
-                  Explore <ArrowRight className="w-3.5 h-3.5" />
-                </span>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-
-      {/* Footer Callout */}
-      <div className={`usage-footer p-6 rounded-[2.2rem] ${isLightMode ? 'bg-purple-50 border border-purple-200 text-slate-900 shadow-md' : 'bg-gradient-to-r from-purple-950/70 via-pink-950/70 to-slate-950/90 border border-pink-500/30 text-white shadow-2xl'} text-center space-y-3`}>
-        <div className={`inline-flex items-center justify-center p-3 rounded-full ${isLightMode ? 'bg-purple-200 text-purple-800' : 'bg-pink-500/20 text-amber-300'} mb-1 shadow-md`}>
-          <Flame className={`w-5 h-5 ${isLightMode ? 'text-purple-700' : 'text-amber-400 fill-amber-400'} animate-bounce`} />
-        </div>
-        <h4 className={`text-base font-black ${isLightMode ? 'text-slate-950' : 'text-white'}`}>Ready to create your first masterpiece?</h4>
-        <p className={`text-xs ${isLightMode ? 'text-slate-700 font-bold' : 'text-slate-300 font-medium'} max-w-md mx-auto`}>
-          Bring your imagination to life. Head to Create → Story & Writing or AI Tools → AI Chat and start your journey!
-        </p>
-      </div>
-
-    </div>
-  );
-}
-// Real backend helpers. `api` is the dashboard's apiRequest (it sends the login token automatically).
 const fetchReviews = (api) => api("/api/reviews");
 const postReview = (api, form) =>
   api("/api/reviews", { method: "POST", body: JSON.stringify({ rating: form.rating, comment: form.comment }) });
@@ -2168,25 +1552,6 @@ function ReviewsSection({ currentStyle, currentUser, onRequireLogin, onOpenStory
     </div>
   );
 }
-function FallingBackground() { return null; }
-function PlotCraftLogo({ size = 32 }) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 48 48" aria-label="PlotCraft logo" style={{ flexShrink: 0 }}>
-      <defs>
-        <linearGradient id="pcLogoGrad" x1="0" y1="0" x2="1" y2="1">
-          <stop offset="0" stopColor="#a855f7" />
-          <stop offset="1" stopColor="#22d3ee" />
-        </linearGradient>
-      </defs>
-      <rect x="2" y="2" width="44" height="44" rx="12" fill="url(#pcLogoGrad)" />
-      <path d="M14 34V14h10a8 8 0 0 1 0 16H14" fill="none" stroke="#fff" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" />
-      <circle cx="34" cy="14" r="3" fill="#fde047" />
-    </svg>
-  );
-}
-function ReadAloudButton() { return null; }
-function FreeVideoHelper() { return null; }
-function StoryViewer() { return null; }
 
 /* ===== Home: PlotCraft World. Living 3D island: idle rotation, drag/zoom, hover glow, camera fly-to, effects and sound. ===== */
 const HERO_CSS = `
@@ -3150,7 +2515,39 @@ class ErrorBoundary extends React.Component {
 /* ===== Upgrade layer: smooth transitions, hover/press feedback, focus rings, scrollbars ===== */
 const UPGRADE_CSS = `
 @keyframes pcPageIn { from { opacity: 0; transform: translateY(14px) scale(.995); } to { opacity: 1; transform: none; } }
+@keyframes pcWelcomeFlyIn {
+  0% { opacity:0; transform:translate3d(var(--pc-entry-x,0),var(--pc-entry-y,32px),0) scale(.96); }
+  72% { opacity:1; transform:translate3d(0,0,0) scale(1.012); }
+  100% { opacity:1; transform:none; }
+}
 .pc-page { animation: pcPageIn .45s cubic-bezier(.2,.8,.2,1) both; }
+.plotcraft-shell[data-home-arrival="true"] .pc-home-hub > .eh-root {
+  --pc-entry-x:-64px; --pc-entry-y:24px;
+  animation:pcWelcomeFlyIn .78s cubic-bezier(.16,1,.3,1) both;
+}
+.plotcraft-shell[data-home-arrival="true"] .pc-home-hub > .ws-root {
+  --pc-entry-x:58px; --pc-entry-y:18px;
+  animation:pcWelcomeFlyIn .72s cubic-bezier(.16,1,.3,1) .14s both;
+}
+.plotcraft-shell[data-home-arrival="true"] .pc-home-hub .ws-grid .ws-tile {
+  --pc-entry-x:0; --pc-entry-y:62px;
+  animation:pcWelcomeFlyIn .72s cubic-bezier(.16,1,.3,1) var(--d,0ms) both;
+}
+.plotcraft-shell[data-home-arrival="true"] .pc-home-hub .ws-grid .ws-tile:nth-child(even) {
+  --pc-entry-x:44px; --pc-entry-y:30px;
+}
+.plotcraft-shell[data-home-arrival="true"] .pcp-landing > .sticky {
+  --pc-entry-x:0; --pc-entry-y:-28px;
+  animation:pcWelcomeFlyIn .65s cubic-bezier(.16,1,.3,1) .12s both;
+}
+.plotcraft-shell[data-home-arrival="true"] .pcp-landing > .w-full.space-y-10 > .ws-root:nth-child(odd) {
+  --pc-entry-x:-48px; --pc-entry-y:30px;
+  animation:pcWelcomeFlyIn .72s cubic-bezier(.16,1,.3,1) .2s both;
+}
+.plotcraft-shell[data-home-arrival="true"] .pcp-landing > .w-full.space-y-10 > .ws-root:nth-child(even) {
+  --pc-entry-x:48px; --pc-entry-y:30px;
+  animation:pcWelcomeFlyIn .72s cubic-bezier(.16,1,.3,1) .32s both;
+}
 .plotcraft-shell button, .plotcraft-shell [role="button"] { transition: transform .2s cubic-bezier(.2,.8,.2,1), background-color .25s ease, box-shadow .25s ease, filter .25s ease; }
 .plotcraft-shell button:hover:not(:disabled) { transform: translateY(-1px); filter: brightness(1.05); }
 .plotcraft-shell button:active:not(:disabled) { transform: translateY(0) scale(.98); }
@@ -3223,7 +2620,9 @@ const PRESETS = {
   arctic: "hue-rotate(190deg) saturate(.85) brightness(1.08)", golden: "sepia(.32) saturate(1.4) brightness(1.08)",
   dreamy: "blur(.35px) saturate(1.2) brightness(1.1)", cyber: "hue-rotate(255deg) saturate(1.6) contrast(1.2)",
   monochrome: "grayscale(1)", fadedFilm: "sepia(.25) contrast(.82) brightness(1.12)", punch: "saturate(2) contrast(1.25)",
-  forest: "hue-rotate(25deg) saturate(1.25)", rose: "sepia(.12) hue-rotate(300deg) saturate(1.25)"
+  forest: "hue-rotate(25deg) saturate(1.25)", rose: "sepia(.12) hue-rotate(300deg) saturate(1.25)",
+  neonNight: "saturate(1.9) hue-rotate(290deg) contrast(1.15)", sepiaSoft: "sepia(.35) brightness(1.05)",
+  crushBlack: "contrast(1.4) brightness(.9)", goldenHour: "sepia(.25) saturate(1.5) hue-rotate(-10deg)", iceBlue: "hue-rotate(200deg) saturate(.9) brightness(1.05)"
 };
 const ADJ = { b: 1, c: 1, s: 1, h: 0, blur: 0 };
 const uid = (p) => `${p}_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
@@ -3238,7 +2637,7 @@ const FONTS = {
   Script: "'Brush Script MT', cursive", Mono: "ui-monospace, Menlo, monospace",
 };
 const ANIMS = ["none", "fade", "slideUp", "slideLeft", "pop", "bounce", "typewriter"];
-const TRANS = ["none", "fade", "slide", "zoom", "wipe", "blur", "dissolve", "push", "circle", "dip-black", "dip-white", "glitch"];
+const TRANS = ["none", "fade", "slide", "zoom", "wipe", "blur", "dissolve", "push", "circle", "dip-black", "dip-white", "glitch", "spin", "flip"];
 const FX = ["vignette", "letterbox", "scanlines", "grain", "flash", "light-leak", "chromatic", "film-dust", "flicker", "glow", "pixelate", "strobe", "lens-flare", "rgb-split", "soft-focus"];
 const rect = [[0, 0], [1, 0], [1, 1], [0, 1]];
 const SHAPES = {
@@ -3260,6 +2659,21 @@ const THEMES = {
   Pastel: { bg: { type: "gradient", c1: "#fbcfe8", c2: "#bfdbfe" }, filter: "pastel", fx: [] },
   Thriller: { bg: { type: "solid", c1: "#09090b", c2: "#18181b" }, filter: "drama", fx: ["vignette", "flicker"] },
   Wedding: { bg: { type: "gradient", c1: "#fce7f3", c2: "#fef3c7" }, filter: "dreamy", fx: ["glow"] },
+  "Cyber Night": { bg: { type: "anim", c1: "#05010f", c2: "#2d0a4e" }, filter: "cyber", fx: ["glow", "scanlines", "chromatic"] },
+  "Noir Rain": { bg: { type: "solid", c1: "#050505", c2: "#050505" }, filter: "noir", fx: ["film-dust", "vignette"] },
+  Vaporwave: { bg: { type: "gradient", c1: "#ff71ce", c2: "#01cdfe" }, filter: "rose", fx: ["rgb-split", "scanlines"] },
+  Polaroid: { bg: { type: "solid", c1: "#f5f1e8", c2: "#f5f1e8" }, filter: "fadedFilm", fx: ["light-leak", "grain"] },
+  Western: { bg: { type: "gradient", c1: "#7c2d12", c2: "#f59e0b" }, filter: "warm", fx: ["film-dust", "vignette"] },
+  "Sci-Fi HUD": { bg: { type: "anim", c1: "#001219", c2: "#005f73" }, filter: "cool", fx: ["scanlines", "flicker"] },
+  "Forest Mist": { bg: { type: "gradient", c1: "#14532d", c2: "#65a30d" }, filter: "forest", fx: ["soft-focus", "light-leak"] },
+  "Desert Heat": { bg: { type: "gradient", c1: "#fbbf24", c2: "#b45309" }, filter: "golden", fx: ["lens-flare", "glow"] },
+  "Arctic Frost": { bg: { type: "gradient", c1: "#e0f2fe", c2: "#7dd3fc" }, filter: "arctic", fx: ["soft-focus", "grain"] },
+  "Lava Glow": { bg: { type: "gradient", c1: "#450a0a", c2: "#ef4444" }, filter: "punch", fx: ["glow", "pixelate"] },
+  "Retro Arcade": { bg: { type: "anim", c1: "#0f0c29", c2: "#302b63" }, filter: "vivid", fx: ["pixelate", "scanlines", "strobe"] },
+  "Golden Hour": { bg: { type: "gradient", c1: "#f97316", c2: "#facc15" }, filter: "goldenHour", fx: ["light-leak", "lens-flare"] },
+  "Candy Pop": { bg: { type: "gradient", c1: "#f472b6", c2: "#a78bfa" }, filter: "pastel", fx: ["strobe", "soft-focus"] },
+  "Midnight Blue": { bg: { type: "solid", c1: "#020617", c2: "#020617" }, filter: "matte", fx: ["vignette", "film-dust"] },
+  "B&W Classic": { bg: { type: "solid", c1: "#000", c2: "#000" }, filter: "monochrome", fx: ["grain", "flicker"] },
   Gaming: { bg: { type: "anim", c1: "#111827", c2: "#7e22ce" }, filter: "cyber", fx: ["scanlines", "rgb-split"] },
   Sports: { bg: { type: "solid", c1: "#052e16", c2: "#14532d" }, filter: "punch", fx: ["flash"] },
   Editorial: { bg: { type: "solid", c1: "#f8fafc", c2: "#e2e8f0" }, filter: "monochrome", fx: ["letterbox"] },
@@ -3296,27 +2710,93 @@ function animState(o, t) {
   return r;
 }
 
-/** Incoming-clip transition at clip-local time. */
+/** Incoming-clip transition at clip-local time. Every type here is drawn by the renderer and the preview. */
 function transState(clip, local) {
-  const r = { op: 1, tx: 0, sc: 1, inset: 0, blur: 0 };
+  const r = { op: 1, tx: 0, ty: 0, sc: 1, inset: 0, blur: 0, circle: null, black: 0, white: 0, jitter: 0, rot: 0, flipX: 1 };
   const tr = clip.trans;
   if (!tr || tr.type === "none" || local >= tr.d) return r;
   const p = clamp(local / tr.d); const e = 1 - (1 - p) ** 3;
-  if (tr.type === "fade") r.op = p;
-  else if (tr.type === "slide") r.tx = (1 - e) * 100;
-  else if (tr.type === "zoom") { r.op = p; r.sc = 0.6 + 0.4 * e; }
-  else if (tr.type === "wipe") r.inset = (1 - p) * 100;
-  else if (tr.type === "blur") { r.op = p; r.blur = (1 - p) * 14; }
+  switch (tr.type) {
+    case "fade": r.op = p; break;
+    case "slide": r.tx = (1 - e) * 100; break;
+    case "zoom": r.op = p; r.sc = 0.6 + 0.4 * e; break;
+    case "wipe": r.inset = (1 - p) * 100; break;
+    case "blur": r.op = p; r.blur = (1 - p) * 14; break;
+    case "dissolve": r.op = p * p; r.sc = 1.03 - 0.03 * e; break;
+    case "push": r.ty = (1 - e) * 100; break;
+    case "circle": r.circle = e; break;
+    case "dip-black": r.op = p; r.black = 1 - p; break;
+    case "dip-white": r.op = p; r.white = 1 - p; break;
+    case "glitch": r.jitter = (1 - p) * 40 * (Math.random() > 0.5 ? 1 : -1); r.op = 0.5 + 0.5 * p; break;
+    case "spin": r.op = p; r.rot = (1 - e) * 180; r.sc = 0.5 + 0.5 * e; break;
+    case "flip": r.flipX = Math.max(0.02, e); r.op = p; break;
+    default: break;
+  }
   return r;
 }
 
+function clipMotionState(clip, local) {
+  const motion = clip.motion;
+  if (!motion?.from || !motion?.to) return { x: 0, y: 0, zoom: 1 };
+  const progress = clamp(local / dur(clip));
+  const easing = motion.easing || "easeInOut";
+  const eased = easing === "easeIn"
+    ? progress ** 3
+    : easing === "easeOut"
+      ? 1 - (1 - progress) ** 3
+      : easing === "easeInOut"
+        ? progress < 0.5 ? 4 * progress ** 3 : 1 - (-2 * progress + 2) ** 3 / 2
+        : progress;
+  return {
+    x: (motion.from.x || 0) + ((motion.to.x || 0) - (motion.from.x || 0)) * eased,
+    y: (motion.from.y || 0) + ((motion.to.y || 0) - (motion.from.y || 0)) * eased,
+    zoom: (motion.from.zoom || 1) + ((motion.to.zoom || 1) - (motion.from.zoom || 1)) * eased,
+  };
+}
+
+/* Effects that sample the picture underneath them (preview copies the video frame first). */
+const SAMPLING_FX = ["chromatic", "pixelate", "glow", "soft-focus", "rgb-split"];
+const rnd = (a, b) => a + Math.random() * (b - a);
+const snapCanvas = (g, W, H) => {
+  const c = document.createElement("canvas"); c.width = W; c.height = H;
+  c.getContext("2d").drawImage(g.canvas, 0, 0, W, H);
+  return c;
+};
+
+/** Draws one effect layer. Used by the preview canvas and the full video render alike. */
 function drawFx(g, W, H, o, t) {
   g.save();
-  if (o.fxType === "vignette") { const r = g.createRadialGradient(W / 2, H / 2, H * 0.35, W / 2, H / 2, H * 0.95); r.addColorStop(0, "rgba(0,0,0,0)"); r.addColorStop(1, "rgba(0,0,0,.7)"); g.fillStyle = r; g.fillRect(0, 0, W, H); }
-  if (o.fxType === "letterbox") { g.fillStyle = "#000"; g.fillRect(0, 0, W, H * 0.12); g.fillRect(0, H * 0.88, W, H * 0.12); }
-  if (o.fxType === "scanlines") { g.fillStyle = "rgba(0,0,0,.18)"; for (let y = 0; y < H; y += 4) g.fillRect(0, y, W, 1.5); }
-  if (o.fxType === "grain") { g.fillStyle = "rgba(255,255,255,.1)"; for (let i = 0; i < 500; i++) g.fillRect(Math.random() * W, Math.random() * H, 2, 2); }
-  if (o.fxType === "flash") { g.fillStyle = `rgba(255,255,255,${clamp(1 - (t - o.start) / 0.5) * 0.9})`; g.fillRect(0, 0, W, H); }
+  const k = o.fxType; const age = t - o.start; const dur = Math.max(0.5, (o.end ?? o.start + 5) - o.start);
+  if (k === "vignette") { const r = g.createRadialGradient(W / 2, H / 2, H * 0.35, W / 2, H / 2, H * 0.95); r.addColorStop(0, "rgba(0,0,0,0)"); r.addColorStop(1, "rgba(0,0,0,.7)"); g.fillStyle = r; g.fillRect(0, 0, W, H); }
+  if (k === "letterbox") { g.fillStyle = "#000"; g.fillRect(0, 0, W, H * 0.12); g.fillRect(0, H * 0.88, W, H * 0.12); }
+  if (k === "scanlines") { g.fillStyle = "rgba(0,0,0,.18)"; for (let y = 0; y < H; y += 4) g.fillRect(0, y, W, 1.5); }
+  if (k === "grain") { g.fillStyle = "rgba(255,255,255,.1)"; for (let i = 0; i < 500; i++) g.fillRect(Math.random() * W, Math.random() * H, 2, 2); }
+  if (k === "flash") { g.fillStyle = `rgba(255,255,255,${clamp(1 - age / 0.5) * 0.9})`; g.fillRect(0, 0, W, H); }
+  if (k === "light-leak") {
+    const pulse = 0.5 + 0.25 * Math.sin(age * 2.2); const gx = W * (0.15 + 0.1 * Math.sin(age));
+    const r = g.createRadialGradient(gx, 0, 0, gx, 0, W * 0.75);
+    r.addColorStop(0, `rgba(255,150,70,${pulse})`); r.addColorStop(0.5, `rgba(255,60,140,${pulse * 0.4})`); r.addColorStop(1, "rgba(0,0,0,0)");
+    g.globalCompositeOperation = "screen"; g.fillStyle = r; g.fillRect(0, 0, W, H);
+  }
+  if (k === "film-dust") { for (let i = 0; i < 60; i++) { g.fillStyle = Math.random() > 0.5 ? "rgba(255,255,255,.7)" : "rgba(0,0,0,.6)"; g.beginPath(); g.arc(Math.random() * W, Math.random() * H, rnd(0.6, 2.4), 0, Math.PI * 2); g.fill(); } }
+  if (k === "flicker") { g.fillStyle = `rgba(0,0,0,${rnd(0, 0.35)})`; g.fillRect(0, 0, W, H); }
+  if (k === "strobe") { if (Math.floor(age * 10) % 2 === 0) { g.fillStyle = "rgba(255,255,255,.35)"; g.fillRect(0, 0, W, H); } }
+  if (k === "lens-flare") {
+    const x = W * ((age / dur) % 1); const rad = W * 0.12;
+    const r = g.createRadialGradient(x, H * 0.3, 0, x, H * 0.3, rad);
+    r.addColorStop(0, "rgba(255,240,200,.9)"); r.addColorStop(0.3, "rgba(255,200,120,.25)"); r.addColorStop(1, "rgba(0,0,0,0)");
+    g.globalCompositeOperation = "screen"; g.fillStyle = r; g.beginPath(); g.arc(x, H * 0.3, rad, 0, Math.PI * 2); g.fill();
+  }
+  if (k === "glow") { const snap = snapCanvas(g, W, H); g.globalCompositeOperation = "screen"; g.globalAlpha = 0.55; g.filter = "blur(18px)"; g.drawImage(snap, 0, 0, W, H); }
+  if (k === "soft-focus") { const snap = snapCanvas(g, W, H); g.globalAlpha = 0.5; g.filter = "blur(6px)"; g.drawImage(snap, 0, 0, W, H); }
+  if (k === "chromatic") { const snap = snapCanvas(g, W, H); const d = Math.max(2, W * 0.003); g.globalCompositeOperation = "lighter"; g.globalAlpha = 0.5; g.drawImage(snap, d, 0, W, H); g.drawImage(snap, -d, 0, W, H); }
+  if (k === "rgb-split") { const snap = snapCanvas(g, W, H); const d = W * 0.008; g.globalCompositeOperation = "screen"; g.globalAlpha = 0.6; g.drawImage(snap, d, 0, W, H); g.drawImage(snap, -d, 0, W, H); }
+  if (k === "pixelate") {
+    const f = 24; const small = document.createElement("canvas");
+    small.width = Math.max(1, Math.round(W / f)); small.height = Math.max(1, Math.round(H / f));
+    small.getContext("2d").drawImage(g.canvas, 0, 0, small.width, small.height);
+    g.imageSmoothingEnabled = false; g.drawImage(small, 0, 0, W, H); g.imageSmoothingEnabled = true;
+  }
   g.restore();
 }
 
@@ -3328,14 +2808,17 @@ function drawFrame(g, W, H, t, S) {
   const { clip, local } = locateClip(clips, t);
   const v = clip && vids[clip.id];
   if (clip && v && v.videoWidth) {
-    const tr = transState(clip, local); const z = tr.sc * (clip.zoom || 1);
+    const tr = transState(clip, local); const motion = clipMotionState(clip, local); const z = tr.sc * (clip.zoom || 1) * motion.zoom;
     g.save();
     if (tr.inset) { g.beginPath(); g.rect(0, 0, W * (1 - tr.inset / 100), H); g.clip(); }
+    if (tr.circle !== null) { g.beginPath(); g.arc(W / 2, H / 2, (tr.circle * Math.hypot(W, H)) / 2, 0, Math.PI * 2); g.clip(); }
     g.globalAlpha = tr.op; g.filter = (cssFilter(clip) + (tr.blur ? ` blur(${tr.blur}px)` : "")).trim() || "none";
-    g.translate(W / 2 + (tr.tx / 100) * W, H / 2); g.scale(z, z);
+    g.translate(W / 2 + ((tr.tx + motion.x) / 100) * W + tr.jitter, H / 2 + ((tr.ty + motion.y) / 100) * H);
+    g.rotate((tr.rot * Math.PI) / 180); g.scale(z * tr.flipX, z);
     const s = Math.min(W / v.videoWidth, H / v.videoHeight);
     g.drawImage(v, (-v.videoWidth * s) / 2, (-v.videoHeight * s) / 2, v.videoWidth * s, v.videoHeight * s);
     g.restore();
+    if (tr.black || tr.white) { g.save(); g.fillStyle = tr.black ? `rgba(0,0,0,${tr.black})` : `rgba(255,255,255,${tr.white})`; g.fillRect(0, 0, W, H); g.restore(); }
   }
   overlays.forEach((o) => {
     if (t < o.start || t > o.end) return;
@@ -3361,16 +2844,24 @@ function drawFrame(g, W, H, t, S) {
   });
 }
 
+/** Output presets for the studio render (resolution, default bitrate). */
+const RENDER_RES = {
+  "720p": { w: 1280, h: 720, bitrate: 8000000 },
+  "1080p": { w: 1920, h: 1080, bitrate: 16000000 },
+  "1440p": { w: 2560, h: 1440, bitrate: 28000000 },
+  "4K": { w: 3840, h: 2160, bitrate: 45000000 },
+};
+
 /** Renders the whole timeline (videos + songs + layers) in real time into a WebM file. */
-async function renderProject({ clips, overlays, audio, bg, total, onProgress }) {
-  const W = 1280; const H = 720; const c = document.createElement("canvas"); c.width = W; c.height = H;
+async function renderProject({ clips, overlays, audio, bg, total, onProgress, width = 1280, height = 720, fps = 30, bitrate = 8000000 }) {
+  const W = width; const H = height; const c = document.createElement("canvas"); c.width = W; c.height = H;
   const g = c.getContext("2d"); const ac = new (window.AudioContext || window.webkitAudioContext)(); const dest = ac.createMediaStreamDestination();
   const mk = (tag, url) => new Promise((res) => { const e = document.createElement(tag); e.preload = "auto"; e.playsInline = true; e.onloadedmetadata = () => res(e); e.onerror = () => res(e); e.src = url; });
   const vids = {}; for (const cl of clips) { const v = await mk("video", cl.url); const gn = ac.createGain(); gn.gain.value = cl.muted ? 0 : cl.volume ?? 1; ac.createMediaElementSource(v).connect(gn).connect(dest); vids[cl.id] = v; }
   const auds = {}; for (const a of audio) { const e = await mk("audio", a.url); const gn = ac.createGain(); ac.createMediaElementSource(e).connect(gn).connect(dest); auds[a.id] = { e, gn }; }
   const imgs = {}; for (const o of overlays) if (o.kind === "image" && o.src && !imgs[o.src]) imgs[o.src] = await new Promise((r) => { const i = new Image(); i.onload = () => r(i); i.onerror = () => r(null); i.src = o.src; });
   const mime = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"].find((m) => MediaRecorder.isTypeSupported(m));
-  const rec = new MediaRecorder(new MediaStream([...c.captureStream(30).getVideoTracks(), ...dest.stream.getAudioTracks()]), mime ? { mimeType: mime } : undefined);
+  const rec = new MediaRecorder(new MediaStream([...c.captureStream(fps).getVideoTracks(), ...dest.stream.getAudioTracks()]), mime ? { mimeType: mime, videoBitsPerSecond: bitrate } : { videoBitsPerSecond: bitrate });
   const chunks = []; rec.ondataavailable = (e) => e.data.size && chunks.push(e.data);
   const stopped = new Promise((r) => { rec.onstop = r; });
   await ac.resume(); rec.start(250);
@@ -3461,7 +2952,8 @@ function ProLanding({ categories, search, setSearch, onOpen, projects = [], onOp
 
   const [legal, setLegal] = useState(null);
   return (
-    <div className="pcp-landing min-h-screen w-full overflow-x-hidden" data-theme={themeName}>
+    <div className="pcp-landing relative isolate min-h-screen w-full overflow-x-hidden" data-theme={themeName}>
+      <DashboardBackdrop />
       <style>{PCP_ANIM_CSS + `
         .pcp-landing { --home-bg:#101827; --home-surface:#182337; --home-surface2:#202d43; --home-text:#f1f5f9; --home-muted:#a8b4c7; --home-line:rgba(255,255,255,.11); --home-hero-a:#6d28d9; --home-hero-b:#c026d3; background:var(--home-bg)!important; color:var(--home-text)!important; transition:background .25s ease,color .25s ease; }
         .pcp-landing[data-theme="standard"] { --home-bg:#f4f6fb; --home-surface:#ffffff; --home-surface2:#f8fafc; --home-text:#172033; --home-muted:#64748b; --home-line:#dce3ed; --home-hero-a:#e9eefe; --home-hero-b:#fce7f3; }
@@ -3519,13 +3011,36 @@ function ProLanding({ categories, search, setSearch, onOpen, projects = [], onOp
         {shown.map(([name, list], gi) => (
           <WorkspaceGroup key={name} name={name} list={list} index={gi} onOpen={onOpen} />
         ))}
-        <footer className="border-t border-white/10 pt-8 text-xs text-slate-400">
-          <div className="flex flex-wrap items-center justify-between gap-4">
+        <footer className="mt-4 rounded-3xl border border-white/10 bg-white/[0.03] p-8 text-sm text-slate-300">
+          <div className="grid grid-cols-2 gap-8 md:grid-cols-4">
+            <div className="space-y-2">
+              <p className="text-[11px] font-black uppercase tracking-widest text-white">Product</p>
+              <a href="#tools" className="block hover:text-white">Tools</a>
+              <a href="#pricing" className="block hover:text-white">Pricing</a>
+              <a href="#about" className="block hover:text-white">About</a>
+              <a href="#contact" className="block hover:text-white">Contact</a>
+            </div>
+            <div className="space-y-2">
+              <p className="text-[11px] font-black uppercase tracking-widest text-white">Resources</p>
+              <a href="#blog" className="block hover:text-white">Blog</a>
+              <a href="#tutorials" className="block hover:text-white">Tutorials</a>
+              <a href="#docs" className="block hover:text-white">Documentation</a>
+            </div>
+            <div className="space-y-2">
+              <p className="text-[11px] font-black uppercase tracking-widest text-white">Legal</p>
+              <button type="button" onClick={() => setLegal("privacy")} className="block text-left hover:text-white">Privacy</button>
+              <button type="button" onClick={() => setLegal("terms")} className="block text-left hover:text-white">Terms</button>
+            </div>
+            <div className="space-y-2">
+              <p className="text-[11px] font-black uppercase tracking-widest text-white">Social</p>
+              <a href="#x" className="block hover:text-white">X / Twitter</a>
+              <a href="#instagram" className="block hover:text-white">Instagram</a>
+              <a href="#youtube" className="block hover:text-white">YouTube</a>
+            </div>
+          </div>
+          <div className="mt-8 flex flex-wrap items-center justify-between gap-3 border-t border-white/10 pt-5 text-xs text-slate-400">
             <span>© {new Date().getFullYear()} PlotCraft AI</span>
-            <nav className="flex flex-wrap gap-5">
-              <button type="button" onClick={() => setLegal("privacy")} className="hover:text-white">Privacy Policy</button>
-              <button type="button" onClick={() => setLegal("terms")} className="hover:text-white">Terms of Use</button>
-            </nav>
+            <span>Imagine · Create · Learn · Discover</span>
           </div>
         </footer>
         {legal && <LegalModal kind={legal} onClose={() => setLegal(null)} />}
@@ -3589,6 +3104,7 @@ function KineVideoStudio({ clips, overlays, audio = [], settings = {}, patchProj
   const [t, setT] = useState(0);
   const [playing, setPlaying] = useState(false);
   const [tool, setTool] = useState("media");
+  const [renderOpts, setRenderOpts] = useState({ res: "1080p", fps: 30, aspect: "16:9" });
   const [full, setFull] = useState(false);
   useEffect(() => {
     if (!full) return undefined;
@@ -3725,6 +3241,64 @@ function KineVideoStudio({ clips, overlays, audio = [], settings = {}, patchProj
     commit({ videoClips: clips.map((c) => ({ ...c, filter: th.filter })), videoOverlays: [...keep, ...fxs], settings: { videoBg: th.bg } });
     notify("Theme applied.");
   };
+  const addCaption = ({ text, duration: requestedDuration }) => {
+    const duration = clamp(Number(requestedDuration) || 3, 0.5, 10);
+    const limit = total > 0 ? total : t + duration;
+    const start = total > 0 ? Math.min(t, Math.max(0, total - Math.min(0.5, duration))) : t;
+    const end = Math.min(limit, start + duration);
+    const caption = base("text", {
+      text,
+      x: 50,
+      y: 86,
+      size: 25,
+      color: "#ffffff",
+      bg: "#111827",
+      bold: true,
+      font: "Sans",
+      start,
+      end: Math.max(start + 0.1, end),
+      anim: "slideUp",
+      animDur: 0.45,
+    });
+    addLayers([caption]);
+    notify("Caption added at the playhead.");
+  };
+  const addBeatEffects = () => {
+    const track = audio.find((item) => item.peaks?.length);
+    if (!track) return notify("Import a song with a waveform first.");
+    const peaks = track.peaks;
+    const sourceDuration = track.srcDur || track.out;
+    if (!sourceDuration || peaks.length < 3) return notify("This song has no usable waveform data.");
+    const trimStart = Number.isFinite(track.in) ? track.in : 0;
+    const trimEnd = Number.isFinite(track.out) ? track.out : sourceDuration;
+    const trackStart = Number.isFinite(track.start) ? track.start : 0;
+    const mean = peaks.reduce((sum, peak) => sum + peak, 0) / peaks.length;
+    const threshold = Math.max(0.15, mean * 1.6, Math.max(...peaks) * 0.55);
+    const beatTimes = [];
+    let lastBeat = -Infinity;
+    for (let i = 1; i < peaks.length - 1; i += 1) {
+      if (peaks[i] < threshold || peaks[i] < peaks[i - 1] || peaks[i] < peaks[i + 1]) continue;
+      const sourceTime = (i / (peaks.length - 1)) * sourceDuration;
+      if (sourceTime < trimStart || sourceTime > trimEnd) continue;
+      const time = trackStart + sourceTime - trimStart;
+      if (total > 0 && time >= total) continue;
+      if (time - lastBeat < 0.24) continue;
+      beatTimes.push(time);
+      lastBeat = time;
+    }
+    const selected = beatTimes.slice(0, 36);
+    if (!selected.length) return notify("No prominent beats found. Try a louder song or adjust its trim.");
+    const effects = selected.map((time) => base("fx", {
+      fxType: "flash",
+      x: 0,
+      y: 0,
+      start: time,
+      end: time + 0.3,
+      anim: "none",
+    }));
+    setOverlays([...overlays, ...effects]);
+    notify(`Added ${effects.length} beat-synced flash effects.`);
+  };
 
   useEffect(() => {
     const key = (e) => {
@@ -3768,15 +3342,39 @@ function KineVideoStudio({ clips, overlays, audio = [], settings = {}, patchProj
   const render = async () => {
     if (!clips.length) return notify("Import at least one video."); setPlaying(false); setProg(0);
     try {
-      const blob = await renderProject({ clips, overlays, audio, bg, total, onProgress: setProg });
+      const preset = RENDER_RES[renderOpts.res] || RENDER_RES["1080p"];
+      const dimensions = renderOpts.aspect === "9:16"
+        ? { width: preset.h, height: preset.w }
+        : renderOpts.aspect === "1:1"
+          ? { width: preset.h, height: preset.h }
+          : renderOpts.aspect === "4:5"
+            ? { width: Math.round(preset.h * 0.8), height: preset.h }
+            : { width: preset.w, height: preset.h };
+      const blob = await renderProject({ clips, overlays, audio, bg, total, onProgress: setProg, width: dimensions.width, height: dimensions.height, fps: renderOpts.fps, bitrate: preset.bitrate });
       const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "plotcraft-video.webm"; a.click(); notify("Video rendered and downloaded.");
     } catch (err) { notify(`Render failed: ${err.message || err}`); }
     setProg(null);
   };
 
   const btn = "inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 text-[11px] font-bold text-slate-200 hover:bg-white/10 disabled:opacity-40";
+  const fxCanvasRef = useRef(null);
+  useEffect(() => {
+    const c = fxCanvasRef.current; if (!c) return;
+    const g = c.getContext("2d"); const W = c.width; const H = c.height;
+    g.clearRect(0, 0, W, H);
+    const active = overlays.filter((o) => o.kind === "fx" && t >= o.start && t <= o.end);
+    if (!active.length) return;
+    const v = vref.current;
+    if (active.some((o) => SAMPLING_FX.includes(o.fxType)) && v && v.videoWidth) {
+      const s = Math.min(W / v.videoWidth, H / v.videoHeight);
+      g.drawImage(v, (W - v.videoWidth * s) / 2, (H - v.videoHeight * s) / 2, v.videoWidth * s, v.videoHeight * s);
+    }
+    active.forEach((o) => drawFx(g, W, H, o, t));
+  }, [t, overlays]);
+
   const trS = cur ? transState(cur, loc.local) : null;
-  const vStyle = cur ? { filter: `${cssFilter(cur)} blur(${trS.blur}px)`, opacity: trS.op, transform: `translateX(${trS.tx}%) scale(${trS.sc * (cur.zoom || 1)})`, clipPath: trS.inset ? `inset(0 ${trS.inset}% 0 0)` : undefined } : {};
+  const motion = cur ? clipMotionState(cur, loc.local) : { x: 0, y: 0, zoom: 1 };
+  const vStyle = cur ? { filter: `${cssFilter(cur)} blur(${trS.blur}px)`, opacity: trS.op, transform: `translate(${trS.tx + motion.x}%, ${trS.ty + motion.y}%) rotate(${trS.rot}deg) translateX(${trS.jitter}px) scale(${trS.sc * (cur.zoom || 1) * motion.zoom * trS.flipX}, ${trS.sc * (cur.zoom || 1) * motion.zoom})`, clipPath: trS.inset ? `inset(0 ${trS.inset}% 0 0)` : trS.circle !== null ? `circle(${trS.circle * 75}% at 50% 50%)` : undefined } : {};
 
   const renderLayer = (o) => {
     if (t < o.start || t > o.end) return null;
@@ -3791,6 +3389,7 @@ function KineVideoStudio({ clips, overlays, audio = [], settings = {}, patchProj
     return <div key={o.id} onPointerDown={(e) => dragOnStage(e, o)} style={st} className={`absolute cursor-move select-none ${ring}`}>{inner}</div>;
   };
   const fxLayer = (o) => {
+    return null; // effects are drawn on the fx canvas (same code as the export)
     if (o.kind !== "fx" || t < o.start || t > o.end) return null;
     const s = { position: "absolute", inset: 0, pointerEvents: "none" };
     if (o.fxType === "vignette") s.background = "radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,.7) 100%)";
@@ -3854,6 +3453,12 @@ function KineVideoStudio({ clips, overlays, audio = [], settings = {}, patchProj
           <button type="button" className={btn} onClick={() => setFull((f) => !f)} title="Full screen (Esc to exit)">{full ? "⤡ Exit full screen" : "⤢ Full screen"}</button>
           <button type="button" className={btn} onClick={exportFrame}><Camera className="h-3.5 w-3.5" /> Frame</button>
           <button type="button" className={btn} onClick={exportJSON}>Project</button>
+          <select value={renderOpts.res} title="Output resolution" onChange={(e) => setRenderOpts((o) => ({ ...o, res: e.target.value }))} className="rounded-lg border border-white/10 bg-black/30 px-2 py-1.5 text-[11px] font-bold text-slate-100">
+            {Object.keys(RENDER_RES).map((k) => <option key={k} value={k}>{k}</option>)}
+          </select>
+          <select value={renderOpts.fps} title="Frame rate" onChange={(e) => setRenderOpts((o) => ({ ...o, fps: Number(e.target.value) }))} className="rounded-lg border border-white/10 bg-black/30 px-2 py-1.5 text-[11px] font-bold text-slate-100">
+            {[24, 30, 60].map((f) => <option key={f} value={f}>{f} fps</option>)}
+          </select>
           <button type="button" disabled={prog !== null} onClick={render} className="inline-flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-[11px] font-black text-white hover:bg-violet-500 disabled:opacity-70">
             {prog !== null ? <><Loader2 className="h-3.5 w-3.5 animate-spin" /> Rendering {Math.round(prog * 100)}%</> : <><Download className="h-3.5 w-3.5" /> Render video</>}
           </button>
@@ -3970,7 +3575,19 @@ function KineVideoStudio({ clips, overlays, audio = [], settings = {}, patchProj
             <Slider label="Custom speed" value={clip.speed} min={0.25} max={4} unit="×" onChange={(v) => editClip(clip.id, { speed: v })} />
           </>)}
           {["keys", "beat", "captions", "export"].includes(tool) && (
-            <VfxToolPanel tool={tool} clip={clip} editClip={editClip} totalSec={clips.reduce((s, c) => s + (c.end - c.start) / (c.speed || 1), 0)} />
+            <React.Suspense fallback={<PanelFallback label="video tools" />}>
+              <LazyVfxToolPanel
+                tool={tool}
+                clip={clip}
+                editClip={editClip}
+                renderOpts={renderOpts}
+                setRenderOpts={setRenderOpts}
+                totalSec={total}
+                audio={audio}
+                onAddCaption={addCaption}
+                onAddBeatEffects={addBeatEffects}
+              />
+            </React.Suspense>
           )}
           {!clip && ["trans", "filter", "adjust", "speed"].includes(tool) && <p className="text-[11px] text-slate-400">Import and select a clip first.</p>}
         </div>
@@ -3978,7 +3595,9 @@ function KineVideoStudio({ clips, overlays, audio = [], settings = {}, patchProj
         <div className="flex min-h-0 min-w-0 flex-col">
           <div className="grid min-h-[320px] flex-1 place-items-center bg-black/90 p-3 lg:min-h-[420px]">
             <div ref={stage} className="relative aspect-video overflow-hidden rounded-lg" style={{ background: bgCss(bg, t), width: "min(100%, max(280px, calc((100vh - 28rem) * 1.7778)))" }}>
-              {cur ? <video ref={vref} playsInline onLoadedMetadata={(e) => { e.currentTarget.currentTime = want; }} className="h-full w-full object-contain" style={vStyle} />
+              {cur && trS && (trS.black || trS.white) && <div className="pointer-events-none absolute inset-0" style={{ background: trS.black ? `rgba(0,0,0,${trS.black})` : `rgba(255,255,255,${trS.white})` }} />}
+                  <canvas ref={fxCanvasRef} width={1280} height={720} className="pointer-events-none absolute inset-0 h-full w-full object-contain" />
+                  {cur ? <video ref={vref} playsInline onLoadedMetadata={(e) => { e.currentTarget.currentTime = want; }} className="h-full w-full object-contain" style={vStyle} />
                 : <button type="button" onClick={() => fileRef.current?.click()} className="absolute inset-0 grid place-items-center text-xs font-bold text-slate-300"><span className="text-center"><Film className="mx-auto mb-2 h-8 w-8" />Import videos to start editing</span></button>}
               {overlays.map(renderLayer)}
               {overlays.map(fxLayer)}
@@ -4291,7 +3910,15 @@ const fKind = (f) => {
   if (f.type.startsWith("text/") || f.type.includes("json") || F_TEXT_EXT.includes(e)) return "text";
   return "other";
 };
-const fDownload = (blobOrUrl, name) => { const a = document.createElement("a"); a.href = typeof blobOrUrl === "string" ? blobOrUrl : URL.createObjectURL(blobOrUrl); a.download = name; a.click(); };
+const fDownload = (blobOrUrl, name) => {
+  const isBlob = typeof blobOrUrl !== "string";
+  const url = isBlob ? URL.createObjectURL(blobOrUrl) : blobOrUrl;
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  a.click();
+  if (isBlob) window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
 const fBtn = "inline-flex items-center gap-1.5 rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 text-[11px] font-bold text-slate-200 hover:bg-white/10 disabled:opacity-40";
 const fSize = (n) => (n > 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(n / 1024))} KB`);
 
@@ -4303,93 +3930,6 @@ function encodeWav(buf) {
   const data = Array.from({ length: ch }, (_, c) => buf.getChannelData(c)); let o = 44;
   for (let i = 0; i < len; i++) for (let c = 0; c < ch; c++) { const v = Math.max(-1, Math.min(1, data[c][i])); dv.setInt16(o, v < 0 ? v * 0x8000 : v * 0x7fff, true); o += 2; }
   return new Blob([dv], { type: "audio/wav" });
-}
-
-function FileImage({ file, notify }) {
-  const base = useRef(null); const pv = useRef(null); const hist = useRef([]);
-  if (!base.current && typeof document !== "undefined") base.current = document.createElement("canvas");
-  const A0 = { b: 1, c: 1, s: 1, h: 0, blur: 0, gray: 0, sepia: 0, invert: 0 };
-  const [, setVer] = useState(0); const bump = () => setVer((v) => v + 1);
-  const [adj, setAdj] = useState(A0); const [texts, setTexts] = useState([]); const [selT, setSelT] = useState(null);
-  const [crop, setCrop] = useState(null); const [cropOn, setCropOn] = useState(false); const [fmt, setFmt] = useState("png"); const [q, setQ] = useState(0.92); const [rs, setRs] = useState({ w: 0, h: 0 });
-  useEffect(() => {
-    const im = new Image();
-    im.onload = () => { const m = Math.min(1, 4096 / Math.max(im.width, im.height)); const c = base.current; c.width = Math.round(im.width * m); c.height = Math.round(im.height * m); c.getContext("2d").drawImage(im, 0, 0, c.width, c.height); hist.current = []; setRs({ w: c.width, h: c.height }); bump(); };
-    im.src = file.url;
-  }, [file.url]);
-  const filter = `brightness(${adj.b}) contrast(${adj.c}) saturate(${adj.s}) hue-rotate(${adj.h}deg) blur(${adj.blur}px) grayscale(${adj.gray}) sepia(${adj.sepia}) invert(${adj.invert})`;
-  const paint = (c) => {
-    const b = base.current; c.width = b.width; c.height = b.height; const g = c.getContext("2d"); g.filter = filter; g.drawImage(b, 0, 0); g.filter = "none";
-    texts.forEach((t) => { g.font = `800 ${(t.size * b.height) / 100}px sans-serif`; g.fillStyle = t.color; g.textAlign = "center"; g.textBaseline = "middle"; g.fillText(t.text, (t.x / 100) * b.width, (t.y / 100) * b.height); });
-  };
-  useEffect(() => {
-    const c = pv.current; if (!c || !base.current.width) return; paint(c);
-    if (cropOn && crop) { const g = c.getContext("2d"); g.fillStyle = "rgba(0,0,0,.55)"; g.fillRect(0, 0, c.width, c.height); g.save(); g.beginPath(); g.rect(crop.x, crop.y, crop.w, crop.h); g.clip(); g.filter = filter; g.drawImage(base.current, 0, 0); g.restore(); g.strokeStyle = "#fff"; g.setLineDash([8, 6]); g.lineWidth = Math.max(2, c.width / 400); g.strokeRect(crop.x, crop.y, crop.w, crop.h); }
-  });
-  const apply = (fn) => {
-    const b = base.current; hist.current.push(b.toDataURL()); if (hist.current.length > 15) hist.current.shift();
-    const n = document.createElement("canvas"); fn(n, b); b.width = n.width; b.height = n.height; b.getContext("2d").drawImage(n, 0, 0); setRs({ w: b.width, h: b.height }); setCrop(null); setCropOn(false); bump();
-  };
-  const rotate = (d) => apply((n, b) => { n.width = b.height; n.height = b.width; const g = n.getContext("2d"); g.translate(n.width / 2, n.height / 2); g.rotate((d * Math.PI) / 2); g.drawImage(b, -b.width / 2, -b.height / 2); });
-  const flip = (h) => apply((n, b) => { n.width = b.width; n.height = b.height; const g = n.getContext("2d"); g.translate(h ? n.width : 0, h ? 0 : n.height); g.scale(h ? -1 : 1, h ? 1 : -1); g.drawImage(b, 0, 0); });
-  const resize = () => apply((n, b) => { n.width = Math.max(1, rs.w); n.height = Math.max(1, rs.h); n.getContext("2d").drawImage(b, 0, 0, n.width, n.height); });
-  const doCrop = () => crop && crop.w > 4 && apply((n, b) => { n.width = Math.round(crop.w); n.height = Math.round(crop.h); n.getContext("2d").drawImage(b, crop.x, crop.y, crop.w, crop.h, 0, 0, n.width, n.height); });
-  const bake = () => { apply((n) => paint(n)); setAdj(A0); setTexts([]); setSelT(null); notify("Edits applied."); };
-  const undo = () => { const u = hist.current.pop(); if (!u) return notify("Nothing to undo."); const im = new Image(); im.onload = () => { const b = base.current; b.width = im.width; b.height = im.height; b.getContext("2d").drawImage(im, 0, 0); setRs({ w: b.width, h: b.height }); bump(); }; im.src = u; };
-  const exportImg = () => {
-    const c = document.createElement("canvas"); paint(c); let out = c;
-    if (fmt === "jpg") { out = document.createElement("canvas"); out.width = c.width; out.height = c.height; const g = out.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height); g.drawImage(c, 0, 0); }
-    out.toBlob((bl) => fDownload(bl, `${file.name.replace(/\.[^.]+$/, "")}-edited.${fmt}`), `image/${fmt === "jpg" ? "jpeg" : fmt}`, q);
-  };
-  const cropDown = (e) => {
-    if (!cropOn) return; const c = pv.current; const r = c.getBoundingClientRect(); const k = c.width / r.width; const p = (ev) => [(ev.clientX - r.left) * k, (ev.clientY - r.top) * k]; const [x0, y0] = p(e);
-    const mv = (ev) => { const [x, y] = p(ev); setCrop({ x: Math.max(0, Math.min(x0, x)), y: Math.max(0, Math.min(y0, y)), w: Math.min(c.width, Math.abs(x - x0)), h: Math.min(c.height, Math.abs(y - y0)) }); };
-    const up = () => { window.removeEventListener("pointermove", mv); window.removeEventListener("pointerup", up); }; window.addEventListener("pointermove", mv); window.addEventListener("pointerup", up);
-  };
-  const T = texts.find((t) => t.id === selT); const setT = (p) => setTexts(texts.map((t) => (t.id === selT ? { ...t, ...p } : t)));
-  const set = (k) => (v) => setAdj({ ...adj, [k]: v });
-  return (
-    <div className="grid gap-0 lg:grid-cols-[1fr_300px]">
-      <div className="grid min-h-[460px] place-items-center bg-black/80 p-3"><canvas ref={pv} onPointerDown={cropDown} className={`max-h-[560px] max-w-full rounded ${cropOn ? "cursor-crosshair" : ""}`} style={{ background: "repeating-conic-gradient(#2a2a2a 0 25%, #333 0 50%) 0 0/16px 16px" }} /></div>
-      <div className="max-h-[620px] space-y-3 overflow-y-auto border-t border-white/10 p-3 lg:border-l lg:border-t-0">
-        <div className="flex flex-wrap gap-1.5">
-          <button type="button" className={fBtn} onClick={() => rotate(-1)}>⟲ 90°</button><button type="button" className={fBtn} onClick={() => rotate(1)}>⟳ 90°</button>
-          <button type="button" className={fBtn} onClick={() => flip(true)}>Flip H</button><button type="button" className={fBtn} onClick={() => flip(false)}>Flip V</button>
-          <button type="button" className={fBtn} onClick={undo}><Undo2 className="h-3.5 w-3.5" /> Undo</button>
-        </div>
-        <div className="flex flex-wrap items-center gap-1.5">
-          <button type="button" className={`${fBtn} ${cropOn ? "!border-violet-400" : ""}`} onClick={() => { setCropOn(!cropOn); setCrop(null); }}>Crop</button>
-          {cropOn && <button type="button" className={fBtn} onClick={doCrop} disabled={!crop}>Apply crop</button>}
-          <span className="text-[10px] text-slate-400">{cropOn ? "Drag on the image" : `${rs.w} × ${rs.h}px`}</span>
-        </div>
-        <div className="flex items-center gap-1.5 text-[11px] font-bold">
-          <input type="number" value={rs.w} onChange={(e) => { const w = Number(e.target.value); const b = base.current; setRs({ w, h: Math.round((w * b.height) / b.width) }); }} className="w-20 rounded-lg border border-white/15 bg-white/5 px-2 py-1" />×
-          <input type="number" value={rs.h} onChange={(e) => setRs({ ...rs, h: Number(e.target.value) })} className="w-20 rounded-lg border border-white/15 bg-white/5 px-2 py-1" />
-          <button type="button" className={fBtn} onClick={resize}>Resize</button>
-        </div>
-        <p className="text-[11px] font-black">Adjust</p>
-        <Slider label="Brightness" value={adj.b} min={0.3} max={2} onChange={set("b")} /><Slider label="Contrast" value={adj.c} min={0.3} max={2} onChange={set("c")} />
-        <Slider label="Saturation" value={adj.s} min={0} max={3} onChange={set("s")} /><Slider label="Hue" value={adj.h} min={-180} max={180} step={1} onChange={set("h")} />
-        <Slider label="Blur" value={adj.blur} min={0} max={12} step={0.2} onChange={set("blur")} />
-        <div className="flex flex-wrap gap-1.5">
-          <button type="button" className={fBtn} onClick={() => setAdj({ ...A0, gray: 1 })}>B&amp;W</button><button type="button" className={fBtn} onClick={() => setAdj({ ...A0, sepia: 0.8 })}>Sepia</button>
-          <button type="button" className={fBtn} onClick={() => setAdj({ ...A0, invert: 1 })}>Invert</button><button type="button" className={fBtn} onClick={() => setAdj({ ...A0, c: 1.25, s: 1.35 })}>Vivid</button>
-          <button type="button" className={fBtn} onClick={() => setAdj(A0)}>Reset</button><button type="button" className={fBtn} onClick={bake}>Apply to image</button>
-        </div>
-        <p className="text-[11px] font-black">Text</p>
-        <button type="button" className={fBtn} onClick={() => { const t = { id: `t${Date.now()}`, text: "Your text", x: 50, y: 50, size: 10, color: "#ffffff" }; setTexts([...texts, t]); setSelT(t.id); }}><Plus className="h-3.5 w-3.5" /> Add text</button>
-        {T && (<div className="space-y-2 rounded-xl border border-white/10 p-2">
-          <input value={T.text} onChange={(e) => setT({ text: e.target.value })} className="w-full rounded-lg border border-white/15 bg-white/5 px-2 py-1.5 text-xs" />
-          <Slider label="X %" value={T.x} min={0} max={100} step={1} onChange={(x) => setT({ x })} /><Slider label="Y %" value={T.y} min={0} max={100} step={1} onChange={(y) => setT({ y })} /><Slider label="Size" value={T.size} min={2} max={40} step={1} onChange={(size) => setT({ size })} />
-          <div className="flex items-center gap-2"><input type="color" value={T.color} onChange={(e) => setT({ color: e.target.value })} className="h-8 w-10 rounded" /><button type="button" className={fBtn} onClick={() => { setTexts(texts.filter((t) => t.id !== T.id)); setSelT(null); }}><Trash2 className="h-3.5 w-3.5" /></button></div>
-        </div>)}
-        <p className="text-[11px] font-black">Export</p>
-        <Pills items={["png", "jpg", "webp"]} value={fmt} onPick={setFmt} />
-        {fmt !== "png" && <Slider label="Quality" value={q} min={0.3} max={1} onChange={setQ} />}
-        <button type="button" onClick={exportImg} className="flex w-full items-center justify-center gap-2 rounded-xl bg-violet-600 py-2.5 text-xs font-black text-white"><Download className="h-4 w-4" /> Download image</button>
-      </div>
-    </div>
-  );
 }
 
 const csvParse = (t, d) => { const rows = []; let row = []; let cell = ""; let q = false; for (let i = 0; i < t.length; i++) { const c = t[i]; if (q) { if (c === '"' && t[i + 1] === '"') { cell += '"'; i++; } else if (c === '"') q = false; else cell += c; } else if (c === '"') q = true; else if (c === d) { row.push(cell); cell = ""; } else if (c === "\n") { row.push(cell); rows.push(row); row = []; cell = ""; } else if (c !== "\r") cell += c; } row.push(cell); rows.push(row); return rows; };
@@ -4733,15 +4273,83 @@ function PdfConversionHub({ notify }) {
 }
 
 function FileEditor({ project, patchProject, notify }) {
-  const [file, setFile] = useState(() => (project.fileText != null ? { name: project.fileName || "notes.txt", kind: "text", text: project.fileText, size: project.fileText.length, type: "text/plain" } : null));
+  const [file, setFile] = useState(() => {
+    if (project.fileAsset?.id) {
+      return { ...project.fileAsset, type: project.fileAsset.mime, persisted: true, loading: true };
+    }
+    if (project.fileText != null) {
+      return { name: project.fileName || "notes.txt", kind: "text", text: project.fileText, size: project.fileText.length, type: "text/plain" };
+    }
+    return null;
+  });
   const [drag, setDrag] = useState(false); const input = useRef(null); const vid = useRef(null);
+  useEffect(() => {
+    const url = file?.url;
+    if (!url?.startsWith("blob:")) return undefined;
+    return () => URL.revokeObjectURL(url);
+  }, [file?.url]);
+  useEffect(() => {
+    if (!file?.persisted || !file.id || file.url) return undefined;
+    let active = true;
+    (async () => {
+      try {
+        const response = await apiRequest(`/api/assets/${encodeURIComponent(file.id)}`, { raw: true });
+        const url = URL.createObjectURL(await response.blob());
+        if (!active) {
+          URL.revokeObjectURL(url);
+          return;
+        }
+        setFile((current) => current?.id === file.id ? { ...current, url, loading: false } : current);
+      } catch (error) {
+        if (active) {
+          setFile((current) => current?.id === file.id ? { ...current, loading: false, error: error.message } : current);
+        }
+      }
+    })();
+    return () => { active = false; };
+  }, [file?.id, file?.persisted, file?.url]);
   const open = async (f) => {
-    if (!f) return; const kind = fKind(f);
-    if (kind === "text") { const text = await f.text(); setFile({ name: f.name, kind, text, size: f.size, type: f.type }); patchProject({ fileText: text, fileName: f.name }); }
-    else setFile({ name: f.name, kind, url: URL.createObjectURL(f), size: f.size, type: f.type });
+    if (!f) return;
+    try {
+      const kind = fKind(f);
+      if (kind === "text") {
+        const text = await f.text();
+        setFile({ name: f.name, kind, text, size: f.size, type: f.type });
+        patchProject({ fileText: text, fileName: f.name, fileAsset: null });
+      } else {
+        const localFile = { name: f.name, kind, url: URL.createObjectURL(f), size: f.size, type: f.type };
+        setFile(localFile);
+        patchProject({ fileText: null, fileName: "", fileAsset: null });
+        if (!["image", "audio", "video", "pdf"].includes(kind)) {
+          notify("This file is open as a local preview and cannot be saved to your account.");
+          return;
+        }
+        if (!getToken()) {
+          notify("Sign in to save this file. It is open as a local preview for now.");
+          return;
+        }
+        if (!window.confirm(`Upload ${f.name} to private account storage and keep it with this project? This uses your storage quota.`)) {
+          notify("File opened locally. It will not be available after you close it or refresh.");
+          return;
+        }
+        const asset = await uploadUserAsset(f);
+        const fileAsset = {
+          id: asset.id,
+          name: asset.name,
+          size: asset.size,
+          mime: asset.mime,
+          kind,
+        };
+        setFile({ ...fileAsset, type: fileAsset.mime, url: localFile.url, persisted: true });
+        patchProject({ fileText: null, fileName: "", fileAsset });
+        notify("File saved with this project.");
+      }
+    } catch (error) {
+      notify(error?.message || "Could not open or save this file.");
+    }
   };
-  const setText = (text) => { setFile((p) => ({ ...p, text })); patchProject({ fileText: text, fileName: file.name }); };
-  const close = () => { setFile(null); patchProject({ fileText: null, fileName: "" }); };
+  const setText = (text) => { setFile((p) => ({ ...p, text })); patchProject({ fileText: text, fileName: file.name, fileAsset: null }); };
+  const close = () => { setFile(null); patchProject({ fileText: null, fileName: "", fileAsset: null }); };
   const KIND_LABEL = { image: "Image", text: "Text / code", audio: "Audio", video: "Video", pdf: "PDF", other: "File" };
   return (
     <div className="space-y-4 overflow-hidden rounded-2xl border border-white/10 bg-[#0b1122] p-3 text-slate-100 sm:p-4">
@@ -4752,29 +4360,64 @@ function FileEditor({ project, patchProject, notify }) {
         <div className="p-4 sm:p-8" onDragOver={(e) => { e.preventDefault(); setDrag(true); }} onDragLeave={() => setDrag(false)} onDrop={(e) => { e.preventDefault(); setDrag(false); open(e.dataTransfer.files[0]); }}>
           <button type="button" onClick={() => input.current?.click()} className={`grid min-h-[320px] w-full place-items-center rounded-2xl border-2 border-dashed text-center transition ${drag ? "border-violet-400 bg-violet-500/10" : "border-white/20 bg-white/[0.03] hover:bg-white/[0.06]"}`}>
             <span><Upload className="mx-auto mb-3 h-9 w-9 text-violet-300" /><span className="block text-base font-black">Drop any file here, or click to browse</span>
-              <span className="mx-auto mt-2 block max-w-md text-xs leading-relaxed text-slate-400">Images (crop, resize, filters, text), text, code, JSON, CSV and SVG (find and replace, format, table view), audio (trim, fade, WAV export). Video and PDF open as a preview.</span></span>
+              <span className="mx-auto mt-2 block max-w-md text-xs leading-relaxed text-slate-400">Images (crop, resize, color looks, layers, text, page layouts, themes, and PNG/JPG/WebP export), text, code, JSON, CSV and SVG (find and replace, format, table view), audio (trim, fade, WAV export). Video and PDF open as a preview.</span></span>
           </button>
           <div className="mt-4 flex flex-wrap justify-center gap-2">
             <button type="button" className={fBtn} onClick={() => { setFile({ name: "untitled.txt", kind: "text", text: "", size: 0, type: "text/plain" }); }}><FileText className="h-3.5 w-3.5" /> New text file</button>
             <button type="button" className={fBtn} onClick={() => { setFile({ name: "data.json", kind: "text", text: '{\n  "name": "PlotCraft",\n  "items": [1, 2, 3]\n}', size: 0, type: "application/json" }); }}>New JSON</button>
             <button type="button" className={fBtn} onClick={() => { setFile({ name: "table.csv", kind: "text", text: "name,score\nAsha,92\nRavi,88", size: 0, type: "text/csv" }); }}>New CSV</button>
+            <button type="button" className={fBtn} onClick={() => {
+              const canvas = document.createElement("canvas");
+              canvas.width = 1600;
+              canvas.height = 1000;
+              const context = canvas.getContext("2d");
+              context.fillStyle = "#f8fafc";
+              context.fillRect(0, 0, canvas.width, canvas.height);
+              canvas.toBlob((blob) => {
+                if (!blob) {
+                  notify("Could not create a new design canvas.");
+                  return;
+                }
+                setFile({ name: "untitled-design.png", kind: "image", url: URL.createObjectURL(blob), size: blob.size, type: blob.type });
+                patchProject({ fileText: null, fileName: "", fileAsset: null });
+              }, "image/png");
+            }}><ImageIcon className="h-3.5 w-3.5" /> New photo design</button>
           </div>
         </div>
       ) : (
         <>
           <div className="flex flex-wrap items-center justify-between gap-2 border-b border-white/10 px-3 py-2">
             <div className="flex min-w-0 items-center gap-2"><span className="rounded-md bg-violet-500/20 px-2 py-0.5 text-[10px] font-black text-violet-200">{KIND_LABEL[file.kind]}</span>
-              <input value={file.name} onChange={(e) => setFile({ ...file, name: e.target.value })} className="min-w-0 rounded-md border border-transparent bg-transparent px-1.5 py-1 text-xs font-bold focus:border-white/20 focus:outline-none" /><span className="text-[10px] text-slate-500">{fSize(file.size || 0)}</span></div>
+              <input value={file.name} onChange={(e) => {
+                const name = e.target.value;
+                setFile((current) => ({ ...current, name }));
+                if (file.kind === "text") patchProject({ fileName: name });
+                else if (file.persisted) patchProject({ fileAsset: { id: file.id, name, size: file.size, mime: file.mime, kind: file.kind } });
+              }} className="min-w-0 rounded-md border border-transparent bg-transparent px-1.5 py-1 text-xs font-bold focus:border-white/20 focus:outline-none" />
+              {file.persisted && <span className="text-[10px] text-emerald-300">Saved</span>}
+              <span className="text-[10px] text-slate-500">{fSize(file.size || 0)}</span></div>
             <div className="flex gap-2"><button type="button" className={fBtn} onClick={() => input.current?.click()}><Upload className="h-3.5 w-3.5" /> Open another</button><button type="button" className={fBtn} onClick={close}><X className="h-3.5 w-3.5" /> Close</button></div>
           </div>
-          {file.kind === "image" && <FileImage file={file} notify={notify} />}
-          {file.kind === "text" && <FileTextTool file={file} text={file.text} setText={setText} notify={notify} />}
-          {file.kind === "audio" && <FileAudioTool file={file} notify={notify} />}
-          {file.kind === "video" && (<div className="space-y-3 p-4"><video ref={vid} src={file.url} controls className="max-h-[480px] w-full rounded-xl bg-black" />
-            <div className="flex flex-wrap gap-2"><button type="button" className={fBtn} onClick={() => { const v = vid.current; const c = document.createElement("canvas"); c.width = v.videoWidth; c.height = v.videoHeight; c.getContext("2d").drawImage(v, 0, 0); fDownload(c.toDataURL("image/png"), "frame.png"); }}><Camera className="h-3.5 w-3.5" /> Save current frame</button>
-              <span className="self-center text-[11px] text-slate-400">To cut, merge and add graphics, import this video in the Video &amp; VFX studio.</span></div></div>)}
-          {file.kind === "pdf" && <iframe title="PDF preview" src={file.url} className="h-[640px] w-full bg-white" />}
-          {file.kind === "other" && (<div className="p-8 text-center text-xs text-slate-400"><p className="text-sm font-black text-slate-200">{file.name}</p><p className="mt-1">{file.type || "Unknown type"} · {fSize(file.size)}. This format cannot be edited in the browser.</p><button type="button" className={`${fBtn} mt-4`} onClick={() => fDownload(file.url, file.name)}><Download className="h-3.5 w-3.5" /> Download</button></div>)}
+          {file.loading ? (
+            <p role="status" className="p-8 text-center text-xs text-slate-400">Loading saved file…</p>
+          ) : file.error ? (
+            <p role="alert" className="p-8 text-center text-xs text-rose-300">{file.error}</p>
+          ) : (
+            <>
+              {file.kind === "image" && (
+                <React.Suspense fallback={<PanelFallback label="photo editor" />}>
+                  <LazyPhotoDocumentEditor file={file} notify={notify} />
+                </React.Suspense>
+              )}
+              {file.kind === "text" && <FileTextTool file={file} text={file.text} setText={setText} notify={notify} />}
+              {file.kind === "audio" && <FileAudioTool file={file} notify={notify} />}
+              {file.kind === "video" && (<div className="space-y-3 p-4"><video ref={vid} src={file.url} controls className="max-h-[480px] w-full rounded-xl bg-black" />
+                <div className="flex flex-wrap gap-2"><button type="button" className={fBtn} onClick={() => { const v = vid.current; const c = document.createElement("canvas"); c.width = v.videoWidth; c.height = v.videoHeight; c.getContext("2d").drawImage(v, 0, 0); fDownload(c.toDataURL("image/png"), "frame.png"); }}><Camera className="h-3.5 w-3.5" /> Save current frame</button>
+                  <span className="self-center text-[11px] text-slate-400">To cut, merge and add graphics, import this video in the Video &amp; VFX studio.</span></div></div>)}
+              {file.kind === "pdf" && <iframe title="PDF preview" src={file.url} className="h-[640px] w-full bg-white" />}
+              {file.kind === "other" && (<div className="p-8 text-center text-xs text-slate-400"><p className="text-sm font-black text-slate-200">{file.name}</p><p className="mt-1">{file.type || "Unknown type"} · {fSize(file.size)}. This format cannot be edited in the browser.</p><button type="button" className={`${fBtn} mt-4`} onClick={() => fDownload(file.url, file.name)}><Download className="h-3.5 w-3.5" /> Download</button></div>)}
+            </>
+          )}
         </>
       )}
       </div>
@@ -4876,8 +4519,8 @@ const CATEGORIES = [
   {
     id: "files",
     title: "Files Editor",
-    subtitle: "Edit files + convert PDF formats",
-    detail: "Edit images, text, code, JSON, CSV, audio and preview video/PDF. Convert JPG to PDF, PDF pages to JPG and extract PDF text to editable formats.",
+    subtitle: "Photo editor, page designer & file tools",
+    detail: "Create photo designs with filters, crop, text layers, page themes and export. Edit text, code, JSON and CSV, trim audio, preview video/PDF and convert document formats.",
     accent: "from-sky-500/20 to-indigo-500/10 border-sky-400/30 text-sky-300",
     Icon: FileText,
     tools: ["Image / Text", "Audio / Video", "JPG ↔ PDF", "PDF → Word", "PDF → PPT", "PDF → CSV"],
@@ -7040,7 +6683,7 @@ function PlotCraftProStudio({
     }
 
     if (activeCategory === "files") {
-      return <FileEditor project={project} patchProject={patchProject} notify={notify} />;
+      return <FileEditor key={project.id} project={project} patchProject={patchProject} notify={notify} />;
     }
 
     // 4. Video & VFX
@@ -9099,6 +8742,8 @@ function DrawingStudio({ currentStyle, storyTitle, currentUser, onMakeStory, onA
   const activeIdRef = useRef("L1");
   const [zoom, setZoom] = useState(120);
   const [isFull, setIsFull] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
+  const [transparentBg, setTransparentBg] = useState(false);
   const stageRef = useRef(null);
   useEffect(() => {
     const onChange = () => setIsFull(Boolean(document.fullscreenElement));
@@ -9127,8 +8772,7 @@ function DrawingStudio({ currentStyle, storyTitle, currentUser, onMakeStory, onA
     out.save();
     out.globalCompositeOperation = "source-over";
     out.globalAlpha = 1;
-    out.fillStyle = selectedBackground;
-    out.fillRect(0, 0, CANVAS_W, CANVAS_H);
+    if (!transparentBg) { out.fillStyle = selectedBackground; out.fillRect(0, 0, CANVAS_W, CANVAS_H); }
     for (const layer of layersRef.current) {
       if (!layer.visible) continue;
       out.globalAlpha = layer.opacity / 100;
@@ -9169,7 +8813,7 @@ function DrawingStudio({ currentStyle, storyTitle, currentUser, onMakeStory, onA
 
   useEffect(() => {
     composite();
-  }, [background, layers, selectedBackground]);
+  }, [background, layers, selectedBackground, transparentBg]);
 
   const undo = () => {
     const previous = historyRef.current.pop();
@@ -9554,7 +9198,7 @@ function DrawingStudio({ currentStyle, storyTitle, currentUser, onMakeStory, onA
 
   // Keyboard shortcuts: B brush, E eraser, G fill, I eyedropper, [ ] size, Ctrl+Z / Ctrl+Y undo redo.
   const latestRef = useRef({});
-  latestRef.current = { undo, redo, save: saveDrawing, clearLayer: () => clearCanvas(true) };
+  latestRef.current = { undo, redo, save: saveDrawing, clearLayer: () => clearCanvas(true), help: () => setShowHelp((v) => !v) };
   useEffect(() => {
     const onKey = (e) => {
       if (/INPUT|TEXTAREA|SELECT/.test(e.target.tagName) || e.target.isContentEditable) return;
@@ -9572,12 +9216,62 @@ function DrawingStudio({ currentStyle, storyTitle, currentUser, onMakeStory, onA
       else if (!mod && k === "e") setTool("eraser");
       else if (!mod && k === "g") setTool("fill");
       else if (!mod && k === "i") setTool("eyedropper");
+      else if (e.key === "?") latestRef.current.help();
       else if (e.key === "[") setSize((s) => Math.max(1, s - 2));
       else if (e.key === "]") setSize((s) => Math.min(60, s + 2));
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
+
+  // ---- Adjust / layer helpers ----
+  const rewriteActive = (paint, msg) => {
+    const ctx = getCtx(); if (!ctx) return;
+    const cur = layersRef.current.find((l) => l.id === activeIdRef.current);
+    if (cur?.locked) { flash("This layer is locked. Unlock it first."); return; }
+    pushHistory();
+    const tmp = document.createElement("canvas"); tmp.width = CANVAS_W; tmp.height = CANVAS_H;
+    tmp.getContext("2d").drawImage(ctx.canvas, 0, 0);
+    ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+    ctx.save(); paint(ctx, tmp); ctx.restore();
+    composite(); flash(msg);
+  };
+  const adjustActive = (filterCss, msg) => rewriteActive((ctx, tmp) => { ctx.filter = filterCss; ctx.drawImage(tmp, 0, 0); }, msg);
+  const flipActive = (horizontal) => rewriteActive((ctx, tmp) => {
+    if (horizontal) { ctx.translate(CANVAS_W, 0); ctx.scale(-1, 1); } else { ctx.translate(0, CANVAS_H); ctx.scale(1, -1); }
+    ctx.drawImage(tmp, 0, 0);
+  }, horizontal ? "Flipped horizontally" : "Flipped vertically");
+  const mergeDown = () => {
+    const list = [...layersRef.current];
+    const i = list.findIndex((l) => l.id === activeIdRef.current);
+    if (i <= 0) { flash("No layer below to merge into"); return; }
+    const below = list[i - 1];
+    const bctx = below.canvas.getContext("2d");
+    bctx.save(); bctx.globalAlpha = list[i].opacity / 100; bctx.globalCompositeOperation = list[i].blend;
+    bctx.drawImage(list[i].canvas, 0, 0); bctx.restore();
+    list.splice(i, 1);
+    commitLayers(list); selectLayer(below.id); flash("Merged down (not undoable)");
+  };
+  const flattenAll = () => {
+    const list = layersRef.current;
+    if (list.length < 2) { flash("Only one layer"); return; }
+    const bottom = list[0];
+    const bctx = bottom.canvas.getContext("2d");
+    bctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+    list.forEach((l) => {
+      if (!l.visible) return;
+      bctx.save(); bctx.globalAlpha = l.opacity / 100; bctx.globalCompositeOperation = l.blend;
+      bctx.drawImage(l.canvas, 0, 0); bctx.restore();
+    });
+    commitLayers([{ ...bottom, visible: true, opacity: 100, blend: "source-over", name: "Flattened" }]);
+    selectLayer(bottom.id); flash("Flattened (not undoable)");
+  };
+  const resetCanvas = () => {
+    if (!window.confirm("Clear every layer? This cannot be undone.")) return;
+    pushHistory();
+    layersRef.current.forEach((l) => l.canvas.getContext("2d").clearRect(0, 0, CANVAS_W, CANVAS_H));
+    composite(); flash("Canvas cleared");
+  };
 
   const toolButton = (id, label, Icon) => (
     <button
@@ -9698,6 +9392,43 @@ function DrawingStudio({ currentStyle, storyTitle, currentUser, onMakeStory, onA
           {toolButton("eyedropper", "Eyedropper", Droplet)}
         </div>
 
+        <div className={`rounded-2xl p-3 space-y-2 backdrop-blur-md border border-white/10 ${currentStyle.panelBg}`}>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs font-black mr-1">Adjust</span>
+            {[
+              ["Flip H", () => flipActive(true)],
+              ["Flip V", () => flipActive(false)],
+              ["Invert", () => adjustActive("invert(1)", "Inverted")],
+              ["Grayscale", () => adjustActive("grayscale(1)", "Grayscale applied")],
+              ["Sepia", () => adjustActive("sepia(1)", "Sepia applied")],
+              ["Brighter", () => adjustActive("brightness(1.2)", "Brighter")],
+              ["Darker", () => adjustActive("brightness(0.8)", "Darker")],
+              ["Contrast", () => adjustActive("contrast(1.35)", "Contrast increased")],
+              ["Blur", () => adjustActive("blur(3px)", "Blur applied")],
+              ["Merge down", mergeDown],
+              ["Flatten", flattenAll],
+              ["Reset canvas", resetCanvas],
+            ].map(([label, fn]) => (
+              <button key={label} type="button" onClick={fn} className={`px-2.5 py-1.5 rounded-lg text-[11px] font-black cursor-pointer ${currentStyle.btnSecondary}`}>{label}</button>
+            ))}
+            <label className="flex items-center gap-1.5 text-[11px] font-bold">
+              <input type="checkbox" checked={transparentBg} onChange={(e) => setTransparentBg(e.target.checked)} /> Transparent export
+            </label>
+            <button type="button" onClick={() => setShowHelp(true)} className={`px-2.5 py-1.5 rounded-lg text-[11px] font-black cursor-pointer ${currentStyle.btnSecondary}`}>? Shortcuts</button>
+            <span className="ml-auto text-[11px] opacity-70">Steps: {historyRef.current.length}</span>
+          </div>
+        </div>
+        {showHelp && (
+          <div className="fixed inset-0 z-[130] grid place-items-center bg-black/60 p-4" onClick={() => setShowHelp(false)}>
+            <div className="w-full max-w-md space-y-2 rounded-2xl border border-white/10 bg-[#0e1528] p-5 text-slate-200" onClick={(e) => e.stopPropagation()}>
+              <p className="font-black">Keyboard shortcuts</p>
+              {[["B", "Brush"], ["E", "Eraser"], ["G", "Fill"], ["I", "Eyedropper"], ["[ ]", "Brush size"], ["Ctrl+Z / Ctrl+Y", "Undo / Redo"], ["Ctrl+S", "Save drawing"], ["Delete", "Clear active layer"], ["?", "Show or hide this panel"]].map(([k, v]) => (
+                <div key={k} className="flex items-center justify-between text-sm"><span>{v}</span><kbd className="rounded bg-white/10 px-2 py-0.5 text-xs">{k}</kbd></div>
+              ))}
+              <button type="button" onClick={() => setShowHelp(false)} className="mt-2 w-full rounded-xl bg-violet-600 py-2 text-sm font-bold text-white">Close</button>
+            </div>
+          </div>
+        )}
         <div className={`rounded-2xl p-3 space-y-2 backdrop-blur-md border border-white/10 shadow-lg ${currentStyle.panelBg}`}>
           <div className="flex items-center justify-between">
             <span className="text-xs font-black">Layers</span>
@@ -10165,9 +9896,14 @@ const NAV_GROUPS = [
   {
     id: "ai", label: "AI Tools", icon: Cpu, items: [
       { id: "chat", label: "AI Chat", icon: MessageSquare, go: { tab: "search" } },
-      { id: "prompt", label: "Prompt Helper", icon: Wand2, go: { tab: "search" } },
+      { id: "prompt", label: "Prompt Helper", icon: Wand2, go: { tab: "prompt" } },
       { id: "ai-image", label: "AI Image Generator", icon: ImageIcon, go: { action: "visuals", kind: "image" } },
       { id: "ai-video", label: "AI Video Generator", icon: Video, go: { action: "visuals", kind: "video" } },
+    ],
+  },
+  {
+    id: "utils", label: "Utilities", icon: Calculator, items: [
+      { id: "u-all", label: "All utilities", icon: Calculator, go: { tab: "util" } },
     ],
   },
   {
@@ -10195,10 +9931,27 @@ const NAV_GROUPS = [
     ],
   },
 ];
+const resolveInitialNavItem = (label) => {
+  const normalizedLabel = label === "Brain Games" ? "Brain Games · Sudoku" : label;
+  return NAV_GROUPS.flatMap((group) =>
+    group.direct ? [{ ...group.direct, group: group.label }] : group.items.map((item) => ({ ...item, group: group.label }))
+  ).find((item) => item.label === normalizedLabel) || null;
+};
 const DEFAULT_FAVORITES = ["video", "graphic", "story"];
 
-export function AiDashboard() {
+export function AiDashboard({ initialTool = null, initialPrompt = "", initialVoiceReplies = false } = {}) {
   useUpgradeStyles();
+  const initialGo = resolveInitialNavItem(initialTool)?.go;
+  const launchPrompt = typeof initialPrompt === "string" ? initialPrompt.trim() : "";
+  const initialStoryGenre = /horror|scary|ghost|haunted|భయ|హారర్/i.test(launchPrompt)
+    ? (/telugu|తెలుగు/i.test(launchPrompt) ? "Telugu horror story with suspense" : "Horror story with suspense")
+    : (/telugu|తెలుగు/i.test(launchPrompt) ? "Telugu story" : "Moral Story with a good lesson for kids");
+  const [showHomeArrival, setShowHomeArrival] = useState(() => !initialGo);
+  useEffect(() => {
+    if (!showHomeArrival) return undefined;
+    const timer = window.setTimeout(() => setShowHomeArrival(false), 1400);
+    return () => window.clearTimeout(timer);
+  }, [showHomeArrival]);
   const [navQuery, setNavQuery] = useState("");
   const [expandedGroups, setExpandedGroups] = useState({ create: true });
   const [favorites, setFavorites] = useState(() => {
@@ -10483,7 +10236,7 @@ case "standard":
     }
   });
 
-  const [showAuthModal, setShowAuthModal] = useState(false);
+  const [showAuthModal, setShowAuthModal] = useState(() => initialGo?.action === "visuals" && !currentUser);
   const [authMode, setAuthMode] = useState("login");
   const [authForm, setAuthForm] = useState({ name: "", email: "", password: "" });
   const [authError, setAuthError] = useState("");
@@ -10598,11 +10351,15 @@ case "standard":
     setHistory(updated);
   };
 
-  const [currentTab, setCurrentTab] = useState("pro");
+  const [currentTab, setCurrentTab] = useState(() => {
+    if (initialGo?.action === "visuals") return initialGo.kind;
+    if (initialGo?.cat !== undefined) return "pro";
+    return initialGo?.tab || "pro";
+  });
   const [activeProject, setActiveProject] = useState(null);
   const [creativeTab, setCreativeTab] = useState("audio");
-  const [proCategory, setProCategory] = useState(null);
-  const [openProjectsSignal, setOpenProjectsSignal] = useState(0);
+  const [proCategory, setProCategory] = useState(() => initialGo?.cat ?? null);
+  const [openProjectsSignal, setOpenProjectsSignal] = useState(() => (initialGo?.openSaved ? 1 : 0));
   const scrollRef = useRef(null);
 
   // ---- activity tracking (per user, saved on this device) ----
@@ -10654,6 +10411,7 @@ case "standard":
     image: "Script to Image",
     video: "Video Gen",
     search: "AI Chat",
+    prompt: "Prompt Helper",
     about: "About Us",
     usage: "Usage Guidelines",
     toprated: "Top Rated",
@@ -10674,8 +10432,13 @@ case "standard":
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTo({ top: 0, behavior: "smooth" });
   }, [currentTab]);
-  const [selectedGenre, setSelectedGenre] = useState("Moral Story with a good lesson for kids");
-  const [storyTitle, setStoryTitle] = useState("");
+  const [selectedGenre, setSelectedGenre] = useState(initialStoryGenre);
+  const [storyTitle, setStoryTitle] = useState(() => {
+    if (initialTool !== "Story & Writing" || !launchPrompt) return "";
+    return launchPrompt
+      .replace(/^\s*(please\s+)?(create|write|generate|make)\s+(a|an|the)?\s*/i, "")
+      .slice(0, 120);
+  });
   const [heroName, setHeroName] = useState("");
   const [loading, setLoading] = useState(false);
   const [loadingMsg, setLoadingMsg] = useState("");
@@ -10692,20 +10455,31 @@ case "standard":
   const [storyProgress, setStoryProgress] = useState({ done: 0, total: 0, message: "" });
   const [storyJob, setStoryJob] = useState({ id: "", canContinue: false, error: "" });
 
-  const [scriptInput, setScriptInput] = useState("");
+  const [scriptInput, setScriptInput] = useState(() =>
+    initialGo?.action === "visuals" && initialGo.kind === "image" ? launchPrompt : ""
+  );
   const [generatedImage, setGeneratedImage] = useState("");
   const [imageStyle, setImageStyle] = useState("3d");
   const [imageInfo, setImageInfo] = useState({ provider: "", style: "" });
 
-  const [videoInputContent, setVideoInputContent] = useState("");
+  const [videoInputContent, setVideoInputContent] = useState(() =>
+    initialGo?.action === "visuals" && initialGo.kind === "video" ? launchPrompt : ""
+  );
   const [videoDuration, setVideoDuration] = useState(5);
   const [videoUrl, setVideoUrl] = useState("");
   const [isVideoPlaying, setIsVideoPlaying] = useState(false);
   const [aiVideoUrl, setAiVideoUrl] = useState("");
   const [videoError, setVideoError] = useState("");
   const videoCanvasRef = useRef(null);
+  const storyFormRef = useRef(null);
+  const imageGenerateButtonRef = useRef(null);
+  const videoGenerateButtonRef = useRef(null);
+  const autoCreateRef = useRef(false);
 
   const genres = [
+    ...(initialTool === "Story & Writing" && launchPrompt
+      ? [{ name: `Copilot · ${initialStoryGenre}`, val: initialStoryGenre }]
+      : []),
     { name: "Moral Story 🦁", val: "Moral Story with a good lesson for kids" },
     { name: "Space Adventure 🚀", val: "Fun Space Adventure for children" },
     { name: "Magic World 🧙‍♂️", val: "Magical Fantasy story for kids" },
@@ -10748,7 +10522,7 @@ case "standard":
   };
 
   const handleGenerateStory = async (e) => {
-    e.preventDefault();
+    e?.preventDefault();
     if (!storyTitle.trim()) {
       alert("Please enter a story title!");
       return;
@@ -10884,8 +10658,8 @@ case "standard":
     const promptText =
       videoInputContent.trim() || scriptInput.trim() || storyTitle.trim() || generatedStory.substring(0, 200);
 
-    if (!promptText && !generatedImage) {
-      alert("Please enter a text prompt to generate a video!");
+    if (!promptText) {
+      alert("Please enter a text prompt to generate a video.");
       return;
     }
 
@@ -10904,14 +10678,30 @@ case "standard":
       logActivity("video", promptText);
     } catch (err) {
       setVideoError(err?.message || "AI video failed.");
-      if (generatedImage) {
-        setVideoUrl("generated_video_active");
-        setIsVideoPlaying(true);
-      }
     } finally {
       setLoading(false);
     }
   };
+
+  useEffect(() => {
+    if (!launchPrompt || autoCreateRef.current) return;
+    const action = initialTool === "Story & Writing"
+      ? "story"
+      : initialGo?.action === "visuals"
+        ? initialGo.kind
+        : null;
+    if (!["story", "image", "video"].includes(action)) return;
+    if ((action === "image" || action === "video") && !currentUser) return;
+
+    const timer = window.setTimeout(() => {
+      if (autoCreateRef.current) return;
+      autoCreateRef.current = true;
+      if (action === "story") storyFormRef.current?.requestSubmit();
+      else if (action === "image") imageGenerateButtonRef.current?.click();
+      else videoGenerateButtonRef.current?.click();
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [currentUser, initialGo?.action, initialGo?.kind, initialTool, launchPrompt]);
 
   const handleDownloadVideo = () => {
     if (!videoCanvasRef.current) return;
@@ -10972,7 +10762,7 @@ case "standard":
   };
 
   return (
-    <div data-theme={theme} className={`plotcraft-shell relative flex flex-col h-screen ${currentStyle.bgMain} font-sans overflow-hidden transition-colors duration-300`}>
+    <div data-theme={theme} data-home-arrival={showHomeArrival ? "true" : undefined} className={`plotcraft-shell relative flex flex-col h-screen ${currentStyle.bgMain} font-sans overflow-hidden transition-colors duration-300`}>
       <PlotCraftDesign />
       <PlotCraftFX dark={["rgbclr", "cyberpunk", "dream"].includes(theme)} />
       <style>{`
@@ -11082,7 +10872,7 @@ case "standard":
         .plotcraft-shell ::-webkit-scrollbar { width: 8px; height: 8px; }
         .plotcraft-shell ::-webkit-scrollbar-thumb { background: color-mix(in srgb, var(--pc-accent) 35%, transparent); border-radius: 999px; }
         @media (prefers-reduced-motion: reduce) {
-          .plotcraft-shell main, .plotcraft-shell * { animation-duration: .01ms !important; transition-duration: .01ms !important; }
+          .plotcraft-shell main, .plotcraft-shell * { animation-duration: .01ms !important; animation-delay: 0ms !important; transition-duration: .01ms !important; }
         }
 
         /* the accent colour follows the chosen theme */
@@ -11140,8 +10930,6 @@ case "standard":
           }
         }
       `}</style>
-
-      <FallingBackground theme={theme} dream={dream} />
 
       <button
         onClick={() => setIsNavOpen(!isNavOpen)}
@@ -11346,21 +11134,27 @@ case "standard":
 
               {currentTab === "templates" && (
                 <section className="w-full">
-                  <TemplatesGallery api={apiRequest} onCreated={(p) => { setActiveProject(p); setCurrentTab("projects"); }} />
+                  <React.Suspense fallback={<PanelFallback label="templates" />}>
+                    <LazyTemplatesGallery api={apiRequest} onCreated={(p) => { setActiveProject(p); setCurrentTab("projects"); }} />
+                  </React.Suspense>
                 </section>
               )}
 
               {currentTab === "community" && (
                 <section className="w-full">
-                  <CommunityFeed api={apiRequest} />
+                  <React.Suspense fallback={<PanelFallback label="community" />}>
+                    <LazyCommunityFeed api={apiRequest} />
+                  </React.Suspense>
                 </section>
               )}
 
               {currentTab === "projects" && (
                 <section className="w-full">
-                  {activeProject
-                    ? <ProjectWorkspace api={apiRequest} projectId={activeProject.id} onBack={() => setActiveProject(null)} />
-                    : <ProjectsPanel api={apiRequest} onOpen={(p) => setActiveProject(p)} />}
+                  <React.Suspense fallback={<PanelFallback label="projects" />}>
+                    {activeProject
+                      ? <LazyProjectWorkspace api={apiRequest} projectId={activeProject.id} onBack={() => setActiveProject(null)} />
+                      : <LazyProjectsPanel api={apiRequest} onOpen={(p) => setActiveProject(p)} />}
+                  </React.Suspense>
                 </section>
               )}
 
@@ -11417,7 +11211,7 @@ case "standard":
 
               {currentTab === "story" && (
                 <div className="grid grid-cols-1 md:grid-cols-12 gap-6 w-full">
-                  <form onSubmit={handleGenerateStory} className={`md:col-span-5 p-6 rounded-3xl ${currentStyle.bgCard} space-y-4 animate-slide-in-left`}>
+                  <form ref={storyFormRef} onSubmit={handleGenerateStory} className={`md:col-span-5 p-6 rounded-3xl ${currentStyle.bgCard} space-y-4 animate-slide-in-left`}>
                     <div className="flex items-center justify-between">
                       <h3 className="font-black text-sm flex items-center gap-2">
                         <BookOpen className="w-4 h-4 text-purple-600" /> Story setup
@@ -11637,8 +11431,36 @@ case "standard":
 
               {currentTab === "search" && (
                 <div>
-                  <AiSearch currentStyle={currentStyle} currentUser={currentUser} onActivity={logActivity} />
+                  <AiSearch
+                    currentStyle={currentStyle}
+                    currentUser={currentUser}
+                    initialPrompt={initialGo?.tab === "search" ? launchPrompt : ""}
+                    autoRun={initialGo?.tab === "search" && Boolean(launchPrompt)}
+                    initialVoiceReplies={initialVoiceReplies}
+                    onActivity={logActivity}
+                  />
                 </div>
+              )}
+
+              {currentTab === "prompt" && (
+                <React.Suspense fallback={<PanelFallback label="prompt helper" />}>
+                  <LazyPromptHelper
+                    currentStyle={currentStyle}
+                    onUsePrompt={(prompt, mode) => {
+                      if (mode === "image") {
+                        setScriptInput(prompt);
+                        setCurrentTab("image");
+                      } else {
+                        setVideoInputContent(prompt);
+                        setCurrentTab("video");
+                      }
+                      if (!currentUser) {
+                        setAuthMode("login");
+                        setShowAuthModal(true);
+                      }
+                    }}
+                  />
+                </React.Suspense>
               )}
 
               {currentTab === "profile" && currentUser && (
@@ -11651,7 +11473,11 @@ case "standard":
                 />
               )}
 
-              {currentTab === "about" && <AboutPage currentStyle={currentStyle} />}
+              {currentTab === "about" && (
+                <React.Suspense fallback={<PanelFallback label="about page" />}>
+                  <LazyAboutPage currentStyle={currentStyle} />
+                </React.Suspense>
+              )}
 
               {currentTab === "developer" && <DeveloperSection currentStyle={currentStyle} />}
 
@@ -11672,8 +11498,17 @@ case "standard":
 
               {currentTab === "math" && <MathGame currentStyle={currentStyle} onActivity={logActivity} />}
 
-              {currentTab === "usage" && <UsagePage currentStyle={currentStyle} />}
+              {currentTab === "usage" && (
+                <React.Suspense fallback={<PanelFallback label="tutorials" />}>
+                  <LazyUsagePage currentStyle={currentStyle} />
+                </React.Suspense>
+              )}
 
+              {(currentTab === "util" || currentTab.startsWith("util-")) && (
+                <React.Suspense fallback={<PanelFallback label="utilities" />}>
+                  <LazyUtilityTools tool={currentTab} onOpen={(id) => setCurrentTab(id)} onBack={() => setCurrentTab("util")} />
+                </React.Suspense>
+              )}
               {currentTab === "toprated" && (
                 <ReviewsSection
                   api={apiRequest}
@@ -11731,6 +11566,8 @@ case "standard":
                     </div>
 
                     <button
+                      ref={imageGenerateButtonRef}
+                      type="button"
                       onClick={handleScriptToImage}
                       disabled={loading}
                       className={`w-full ${currentStyle.btnPrimary} py-3.5 rounded-2xl text-xs flex items-center justify-center gap-2 cursor-pointer transition`}
@@ -11799,7 +11636,7 @@ case "standard":
                       <Video className="w-4 h-4 text-purple-600" /> AI Motion Video Studio
                     </h3>
                     <p className="text-xs font-bold opacity-80">
-                      Animate your images or text prompt into an immersive cinematic motion sequence with smooth camera moves.
+                      Generate a short cinematic motion clip from a written scene description.
                     </p>
 
                     <div>
@@ -11816,7 +11653,7 @@ case "standard":
                     <div>
                       <label className="text-xs font-black block mb-1">Sequence Duration: {videoDuration} Seconds</label>
                       <div className="flex gap-2">
-                        {[5, 7, 10].map((sec) => (
+                        {[5, 8].map((sec) => (
                           <button
                             key={sec}
                             type="button"
@@ -11834,6 +11671,8 @@ case "standard":
                     </div>
 
                     <button
+                      ref={videoGenerateButtonRef}
+                      type="button"
                       onClick={handleGenerateVideo}
                       disabled={loading}
                       className={`w-full ${currentStyle.btnPrimary} py-3.5 rounded-2xl text-xs flex items-center justify-center gap-2 cursor-pointer transition`}
@@ -11851,15 +11690,23 @@ case "standard":
                       )}
                     </button>
 
-                    <FreeVideoHelper
-                      currentStyle={currentStyle}
-                      prompt={videoInputContent.trim() || scriptInput.trim() || storyTitle.trim() || generatedStory.substring(0, 200)}
-                      message={videoError}
-                      defaultOpen={!!videoError}
-                      currentUser={currentUser}
-                      onRequireLogin={() => { setAuthMode("login"); setShowAuthModal(true); }}
-                      onUploaded={(url) => { setAiVideoUrl(url); setVideoUrl(url); setVideoError(""); }}
-                    />
+                    <React.Suspense fallback={<PanelFallback label="video help" />}>
+                      <LazyFreeVideoHelper
+                        currentStyle={currentStyle}
+                        prompt={videoInputContent.trim() || scriptInput.trim() || storyTitle.trim() || generatedStory.substring(0, 200)}
+                        message={videoError}
+                        defaultOpen={!!videoError}
+                        currentUser={currentUser}
+                        onRequireLogin={() => { setAuthMode("login"); setShowAuthModal(true); }}
+                        onUploaded={async (file) => {
+                          const url = await uploadVideoFile(file);
+                          setAiVideoUrl(url);
+                          setVideoUrl(url);
+                          setVideoError("");
+                          logActivity("video", `Uploaded ${file.name}`);
+                        }}
+                      />
+                    </React.Suspense>
                   </div>
 
                   <div className={`md:col-span-7 p-6 rounded-3xl ${currentStyle.bgCard} flex flex-col items-center justify-center min-h-[380px] animate-slide-in-right`}>
@@ -12107,24 +11954,6 @@ case "standard":
 
   
 
-
-  
-
-
-  
-
-
-  
-  
-
-
-  
-
-
-  
-
-
-  
 
 /* ===== CREATIVE TOOLS: audio editor, video editor, image-to-PDF (runs fully in the browser) ===== */
 function fmtSec(t) {

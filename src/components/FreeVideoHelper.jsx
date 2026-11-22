@@ -1,4 +1,4 @@
-import React, { useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { ExternalLink, Upload, Copy, Check, Loader2, ChevronDown, Sparkles, Video, PlayCircle, ShieldCheck } from "lucide-react";
 
 // Expanded 7 Free high-performance video generation engines
@@ -23,7 +23,8 @@ export default function FreeVideoHelper({
   onRequireLogin = () => {}, 
   onUploaded = () => {} 
 }) {
-  const [open, setOpen] = useState(!!defaultOpen || !!message);
+  const [openOverride, setOpenOverride] = useState(null);
+  const open = openOverride ?? (!!defaultOpen || !!message);
   const [copiedIndex, setCopiedIndex] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -39,14 +40,6 @@ export default function FreeVideoHelper({
     !currentStyle?.bgMain?.includes("indigo");
 
   const btnSecondary = currentStyle?.btnSecondary || "bg-black/10 hover:bg-black/20 text-black dark:bg-white/10 dark:hover:bg-white/20 dark:text-white";
-  const btnPrimary = currentStyle?.btnPrimary || "bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 text-white";
-
-  React.useEffect(() => {
-    if (defaultOpen || message) {
-      setOpen(true);
-    }
-  }, [defaultOpen, message]);
-
   const copyPrompt = async (index = null) => {
     try {
       await navigator.clipboard.writeText(prompt || "Cinematic masterpiece, smooth camera movement, highly detailed");
@@ -54,7 +47,9 @@ export default function FreeVideoHelper({
         setCopiedIndex(index);
         setTimeout(() => setCopiedIndex(null), 2000);
       }
-    } catch {}
+    } catch {
+      setError("Clipboard access is unavailable. Copy the prompt manually.");
+    }
   };
 
   const handleLaunchSite = async (url, index) => {
@@ -116,7 +111,7 @@ export default function FreeVideoHelper({
       {/* Header Banner */}
       <button
         type="button"
-        onClick={() => setOpen(!open)}
+        onClick={() => setOpenOverride(!open)}
         className={`w-full flex items-center justify-between gap-3 px-6 py-4 text-xs md:text-sm font-extrabold cursor-pointer transition-colors ${
           isLightMode ? 'hover:bg-purple-50 text-purple-950' : 'hover:bg-purple-950/40 text-purple-200'
         }`}

@@ -1,14 +1,13 @@
-import React, { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { BookOpen, MessageSquare, Image as ImageIcon, Video, Volume2, Palette, ChevronDown, Heart, Star, Sparkles, FolderOpen, LayoutGrid, Users, Search } from "lucide-react";
 import PlotCraftLogo from "./PlotCraftLogo";
 import { fetchStats } from "../services/api";
 
 const useAboutCountUp = (target, run) => {
   const [value, setValue] = useState(0);
+  const reduceMotion = typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
   useEffect(() => {
-    if (!run || target == null) return;
-    const reduce = typeof window !== "undefined" && window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-    if (reduce) { setValue(target); return; }
+    if (!run || target == null || reduceMotion) return;
     const start = performance.now();
     const duration = 1400;
     let raf;
@@ -19,8 +18,8 @@ const useAboutCountUp = (target, run) => {
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [target, run]);
-  return value;
+  }, [target, run, reduceMotion]);
+  return reduceMotion && target != null ? target : value;
 };
 
 function AboutStat({ label, value, decimals = 0, run }) {

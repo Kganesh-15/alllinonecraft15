@@ -1,258 +1,273 @@
-import React, { useMemo, useState } from "react";
+import { useState } from "react";
 
-/* Video & VFX extra tools: Keyframes, Beat sync, Captions, Export.
-   Works with the existing clip model (clip.id, clip.start, clip.end, clip.speed) and editClip(id, patch). */
+const MOTIONS = {
+  "No motion": { from: { x: 0, y: 0, zoom: 1 }, to: { x: 0, y: 0, zoom: 1 } },
+  "Slow push": { from: { x: 0, y: 0, zoom: 1 }, to: { x: 0, y: 0, zoom: 1.18 } },
+  "Pull back": { from: { x: 0, y: 0, zoom: 1.18 }, to: { x: 0, y: 0, zoom: 1 } },
+  "Pan left": { from: { x: 4, y: 0, zoom: 1.08 }, to: { x: -4, y: 0, zoom: 1.08 } },
+  "Pan right": { from: { x: -4, y: 0, zoom: 1.08 }, to: { x: 4, y: 0, zoom: 1.08 } },
+  "Drift up": { from: { x: 0, y: 4, zoom: 1.08 }, to: { x: 0, y: -4, zoom: 1.08 } },
+  "Dolly in": { from: { x: 2, y: 1, zoom: 1.02 }, to: { x: -2, y: -1, zoom: 1.2 } },
+};
 
-const KEY_PROPS = [
-  { id: "scale", label: "Scale", min: 0.5, max: 2, step: 0.01, def: 1 },
-  { id: "opacity", label: "Opacity", min: 0, max: 1, step: 0.01, def: 1 },
-  { id: "rotate", label: "Rotate °", min: -180, max: 180, step: 1, def: 0 },
-  { id: "x", label: "Move X %", min: -50, max: 50, step: 1, def: 0 },
+const ASPECTS = [
+  ["16:9", "Landscape"],
+  ["9:16", "Portrait"],
+  ["1:1", "Square"],
+  ["4:5", "Social"],
 ];
 
-const RESOLUTIONS = [
-  { label: "720p", w: 1280, h: 720, mbps: 8 },
-  { label: "1080p", w: 1920, h: 1080, mbps: 16 },
-  { label: "1440p", w: 2560, h: 1440, mbps: 28 },
-  { label: "4K", w: 3840, h: 2160, mbps: 45 },
-];
+const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 
-/* Smoothstep interpolation between keyframes. t is 0..1 across the clip. */
-export function interpolateKeys(keys, t) {
-  if (!keys || !keys.length) return null;
-  const k = [...keys].sort((a, b) => a.t - b.t);
-  if (t <= k[0].t) return k[0].v;
-  if (t >= k[k.length - 1].t) return k[k.length - 1].v;
-  for (let i = 0; i < k.length - 1; i++) {
-    const a = k[i], b = k[i + 1];
-    if (t >= a.t && t <= b.t) {
-      const u = (t - a.t) / (b.t - a.t || 1);
-      const e = u * u * (3 - 2 * u);
-      return a.v + (b.v - a.v) * e;
-    }
-  }
-  return k[0].v;
-}
-
-const pill = (on) =>
-  `rounded-lg border px-2.5 py-1.5 text-[11px] font-black transition ${on ? "border-violet-400 bg-violet-600 text-white" : "border-white/10 text-slate-300 hover:bg-white/10"}`;
-const btn = "rounded-lg border border-white/10 px-3 py-1.5 text-[11px] font-black text-slate-200 hover:bg-white/10 disabled:opacity-40";
-const input = "w-full rounded-lg border border-white/10 bg-black/30 px-2 py-1.5 text-xs text-slate-100 focus:border-violet-400 focus:outline-none";
-
-/* ---------- Keyframes ---------- */
-function KeyframesTool({ clip, editClip }) {
-  const [prop, setProp] = useState("scale");
-  const [at, setAt] = useState(0.5);
-  const def = KEY_PROPS.find((p) => p.id === prop);
-  const keys = (clip.keys && clip.keys[prop]) || [];
-  const value = interpolateKeys(keys, at) ?? def.def;
-
-  const saveKeys = (list) => editClip(clip.id, { keys: { ...(clip.keys || {}), [prop]: list } });
-  const addKey = () => {
-    const next = [...keys.filter((k) => Math.abs(k.t - at) > 0.001), { t: at, v: value }];
-    saveKeys(next.sort((a, b) => a.t - b.t));
-  };
-
-  // Curve preview: 60 samples across the clip.
-  const path = useMemo(() => {
-    const W = 240, H = 80;
-    const pts = Array.from({ length: 61 }, (_, i) => {
-      const t = i / 60;
-      const v = interpolateKeys(keys, t) ?? def.def;
-      const y = H - ((v - def.min) / (def.max - def.min)) * H;
-      return `${(t * W).toFixed(1)},${Math.max(0, Math.min(H, y)).toFixed(1)}`;
-    });
-    return pts.join(" ");
-  }, [keys, def]);
-
+function ActionButton({ children, active, onClick }) {
   return (
-    <div className="space-y-3">
-      <p className="text-xs font-black">Keyframes</p>
-      <div className="flex flex-wrap gap-1.5">
-        {KEY_PROPS.map((p) => <button key={p.id} type="button" className={pill(prop === p.id)} onClick={() => setProp(p.id)}>{p.label}</button>)}
-      </div>
-      <svg viewBox="0 0 240 80" className="w-full rounded-lg bg-black/40">
-        <polyline points={path} fill="none" stroke="#a78bfa" strokeWidth="2" />
-        {keys.map((k) => {
-          const y = 80 - ((k.v - def.min) / (def.max - def.min)) * 80;
-          return <circle key={k.t} cx={k.t * 240} cy={Math.max(0, Math.min(80, y))} r="4" fill="#f0abfc" />;
-        })}
-        <line x1={at * 240} x2={at * 240} y1="0" y2="80" stroke="#fde68a" strokeWidth="1" />
-      </svg>
-      <label className="block text-[11px] font-bold text-slate-300">
-        Position in clip: {Math.round(at * 100)}%
-        <input type="range" min={0} max={1} step={0.01} value={at} onChange={(e) => setAt(Number(e.target.value))} className="mt-1 w-full accent-violet-500" />
-      </label>
-      <p className="text-[11px] text-slate-300">Value here: <span className="text-violet-300">{Number(value).toFixed(2)}</span></p>
-      <div className="flex gap-2">
-        <button type="button" className={btn} onClick={addKey}>+ Key at {Math.round(at * 100)}%</button>
-        <button type="button" className={btn} disabled={!keys.length} onClick={() => saveKeys([])}>Clear {def.label}</button>
-      </div>
-      <div className="space-y-1">
-        {keys.map((k, i) => (
-          <div key={i} className="flex items-center gap-2 rounded-lg bg-white/5 px-2 py-1.5 text-[11px]">
-            <span className="w-14 text-slate-400">{Math.round(k.t * 100)}%</span>
-            <input type="number" className={input} step={def.step} min={def.min} max={def.max} value={Number(k.v).toFixed(2)}
-              onChange={(e) => saveKeys(keys.map((x, j) => (j === i ? { ...x, v: Number(e.target.value) } : x)))} />
-            <button type="button" className="text-rose-300 hover:text-rose-200" onClick={() => saveKeys(keys.filter((_, j) => j !== i))}>✕</button>
-          </div>
-        ))}
-        {!keys.length && <p className="text-[11px] text-slate-400">No keys yet. Slider lo position pick chesi "+ Key" nokkandi.</p>}
-      </div>
-    </div>
+    <button
+      type="button"
+      onClick={onClick}
+      className={`rounded-xl border px-3 py-2 text-left text-xs font-bold transition ${
+        active
+          ? "border-violet-400 bg-violet-500/20 text-violet-100"
+          : "border-white/10 bg-white/5 text-slate-200 hover:bg-white/10"
+      }`}
+    >
+      {children}
+    </button>
   );
 }
 
-/* ---------- Beat sync ---------- */
-async function detectBeats(file, sensitivity) {
-  const Ctx = window.AudioContext || window.webkitAudioContext;
-  const ctx = new Ctx();
-  try {
-    const buf = await ctx.decodeAudioData(await file.arrayBuffer());
-    const data = buf.getChannelData(0);
-    const hop = Math.floor(buf.sampleRate * 0.05); // 50 ms blocks
-    const energy = [];
-    for (let i = 0; i + hop <= data.length; i += hop) {
-      let s = 0;
-      for (let j = i; j < i + hop; j++) s += data[j] * data[j];
-      energy.push(Math.sqrt(s / hop));
-    }
-    const beats = [];
-    const win = 10;
-    let last = -1;
-    for (let i = win; i < energy.length; i++) {
-      const avg = energy.slice(i - win, i).reduce((a, b) => a + b, 0) / win;
-      const isPeak = energy[i] > energy[i - 1] && energy[i] >= energy[i + 1 < energy.length ? i + 1 : i];
-      if (isPeak && energy[i] > avg * sensitivity && energy[i] > 0.02 && i * 0.05 - last >= 0.3) {
-        beats.push(Number((i * 0.05).toFixed(2)));
-        last = i * 0.05;
-      }
-    }
-    return { beats, duration: buf.duration };
-  } finally {
-    ctx.close?.();
-  }
+function RangeControl({ label, value, min, max, step = 0.01, onChange, unit = "" }) {
+  return (
+    <label className="block text-[11px] font-bold text-slate-300">
+      <span className="flex justify-between">
+        <span>{label}</span>
+        <span className="text-violet-300">{Number(value).toFixed(2)}{unit}</span>
+      </span>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(event) => onChange(Number(event.target.value))}
+        className="mt-1 w-full accent-violet-500"
+      />
+    </label>
+  );
 }
 
-function BeatTool() {
-  const [file, setFile] = useState(null);
-  const [sens, setSens] = useState(1.6);
-  const [result, setResult] = useState(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-
-  const run = async () => {
-    if (!file) return;
-    setBusy(true); setError("");
-    try { setResult(await detectBeats(file, sens)); }
-    catch { setError("Audio decode avvaledu. MP3/WAV file try cheyandi."); }
-    finally { setBusy(false); }
+export default function PlotCraftVfxTools({
+  tool,
+  clip,
+  editClip,
+  renderOpts,
+  setRenderOpts,
+  totalSec,
+  audio = [],
+  onAddCaption,
+  onAddBeatEffects,
+}) {
+  const [caption, setCaption] = useState("");
+  const motion = clip?.motion || MOTIONS["No motion"];
+  const from = motion.from || MOTIONS["No motion"].from;
+  const to = motion.to || MOTIONS["No motion"].to;
+  const patchMotion = (edge, key, value) => {
+    if (!clip) return;
+    editClip(clip.id, { motion: { ...motion, [edge]: { ...motion[edge], [key]: value } } });
   };
 
   return (
-    <div className="space-y-3">
-      <p className="text-xs font-black">Beat sync</p>
-      <input type="file" accept="audio/*" onChange={(e) => { setFile(e.target.files?.[0] || null); setResult(null); }} className="text-[11px]" />
-      <label className="block text-[11px] font-bold text-slate-300">
-        Sensitivity: {sens.toFixed(1)}
-        <input type="range" min={1.1} max={3} step={0.1} value={sens} onChange={(e) => setSens(Number(e.target.value))} className="mt-1 w-full accent-violet-500" />
-      </label>
-      <button type="button" className={btn} disabled={!file || busy} onClick={run}>{busy ? "Analyzing…" : "Detect beats"}</button>
-      {error && <p className="text-[11px] text-rose-300">{error}</p>}
-      {result && (
+    <section className="vfx-panel-enter space-y-3 rounded-2xl border border-violet-400/20 bg-gradient-to-br from-violet-500/[0.08] via-white/[0.03] to-cyan-400/[0.05] p-3">
+      <style>{`
+        @keyframes vfxPanelEnter {
+          from { opacity: 0; transform: translateY(10px) scale(.985); }
+          to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+        .vfx-panel-enter { animation: vfxPanelEnter .3s cubic-bezier(.2,.8,.2,1) both; }
+        .kine-editor[data-theme="standard"] .vfx-panel-enter .text-white:not(select),
+        .kine-editor[data-theme="world"] .vfx-panel-enter .text-white:not(select),
+        .kine-editor[data-theme="emerald"] .vfx-panel-enter .text-white:not(select),
+        .kine-editor[data-theme="sunset"] .vfx-panel-enter .text-white:not(select),
+        .kine-editor[data-theme="party"] .vfx-panel-enter .text-white:not(select),
+        .kine-editor[data-theme="rainy"] .vfx-panel-enter .text-white:not(select) { color: #172033 !important; }
+        .kine-editor[data-theme="standard"] .vfx-panel-enter .text-slate-300,
+        .kine-editor[data-theme="standard"] .vfx-panel-enter .text-slate-400,
+        .kine-editor[data-theme="standard"] .vfx-panel-enter .text-slate-500,
+        .kine-editor[data-theme="world"] .vfx-panel-enter .text-slate-300,
+        .kine-editor[data-theme="world"] .vfx-panel-enter .text-slate-400,
+        .kine-editor[data-theme="world"] .vfx-panel-enter .text-slate-500,
+        .kine-editor[data-theme="emerald"] .vfx-panel-enter .text-slate-300,
+        .kine-editor[data-theme="emerald"] .vfx-panel-enter .text-slate-400,
+        .kine-editor[data-theme="emerald"] .vfx-panel-enter .text-slate-500,
+        .kine-editor[data-theme="sunset"] .vfx-panel-enter .text-slate-300,
+        .kine-editor[data-theme="sunset"] .vfx-panel-enter .text-slate-400,
+        .kine-editor[data-theme="sunset"] .vfx-panel-enter .text-slate-500,
+        .kine-editor[data-theme="party"] .vfx-panel-enter .text-slate-300,
+        .kine-editor[data-theme="party"] .vfx-panel-enter .text-slate-400,
+        .kine-editor[data-theme="party"] .vfx-panel-enter .text-slate-500,
+        .kine-editor[data-theme="rainy"] .vfx-panel-enter .text-slate-300,
+        .kine-editor[data-theme="rainy"] .vfx-panel-enter .text-slate-400,
+        .kine-editor[data-theme="rainy"] .vfx-panel-enter .text-slate-500 { color: #475569 !important; }
+        .kine-editor[data-theme="standard"] .vfx-panel-enter .text-violet-100,
+        .kine-editor[data-theme="world"] .vfx-panel-enter .text-violet-100,
+        .kine-editor[data-theme="emerald"] .vfx-panel-enter .text-violet-100,
+        .kine-editor[data-theme="sunset"] .vfx-panel-enter .text-violet-100,
+        .kine-editor[data-theme="party"] .vfx-panel-enter .text-violet-100,
+        .kine-editor[data-theme="rainy"] .vfx-panel-enter .text-violet-100 { color: #5b21b6 !important; }
+        .kine-editor[data-theme="standard"] .vfx-panel-enter .text-violet-300,
+        .kine-editor[data-theme="world"] .vfx-panel-enter .text-violet-300,
+        .kine-editor[data-theme="emerald"] .vfx-panel-enter .text-violet-300,
+        .kine-editor[data-theme="sunset"] .vfx-panel-enter .text-violet-300,
+        .kine-editor[data-theme="party"] .vfx-panel-enter .text-violet-300,
+        .kine-editor[data-theme="rainy"] .vfx-panel-enter .text-violet-300 { color: #6d28d9 !important; }
+        @media (prefers-reduced-motion: reduce) {
+          .vfx-panel-enter { animation: none; }
+        }
+      `}</style>
+
+      {tool === "keys" && (
         <>
-          <p className="text-[11px] text-slate-300">{result.beats.length} beats found in {result.duration.toFixed(1)}s · avg gap {result.beats.length > 1 ? ((result.beats[result.beats.length - 1] - result.beats[0]) / (result.beats.length - 1)).toFixed(2) : "–"}s</p>
-          <div className="flex flex-wrap gap-1">
-            {result.beats.slice(0, 80).map((b) => <span key={b} className="rounded bg-violet-500/25 px-1.5 py-0.5 text-[10px] text-violet-100">{b}s</span>)}
+          <div>
+            <p className="text-sm font-black text-white">Camera keyframes</p>
+            <p className="mt-1 text-[11px] leading-relaxed text-slate-400">
+              Animate position and zoom from the start to the end of the selected clip.
+            </p>
           </div>
-          <p className="text-[11px] text-slate-400">Beat times ni cut points ga use cheyyochu. Sensitivity pettandi ante takkuva beats vasthayi.</p>
+          {!clip ? (
+            <p className="rounded-xl border border-white/10 bg-white/5 p-3 text-xs text-slate-300">
+              Import and select a clip to add camera motion.
+            </p>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 gap-2">
+                {Object.entries(MOTIONS).map(([name, preset]) => (
+                  <ActionButton
+                    key={name}
+                    active={JSON.stringify(motion.from) === JSON.stringify(preset.from) && JSON.stringify(motion.to) === JSON.stringify(preset.to)}
+                    onClick={() => editClip(clip.id, { motion: { ...preset, easing: "easeInOut" } })}
+                  >
+                    {name}
+                  </ActionButton>
+                ))}
+              </div>
+              <div className="space-y-2 rounded-xl border border-white/10 bg-black/10 p-3">
+                <p className="text-[11px] font-black uppercase tracking-wide text-slate-300">Start keyframe</p>
+                <RangeControl label="Zoom" value={from.zoom ?? 1} min={1} max={2.5} unit="×" onChange={(value) => patchMotion("from", "zoom", value)} />
+                <RangeControl label="Horizontal" value={from.x ?? 0} min={-10} max={10} unit="%" onChange={(value) => patchMotion("from", "x", value)} />
+                <RangeControl label="Vertical" value={from.y ?? 0} min={-10} max={10} unit="%" onChange={(value) => patchMotion("from", "y", value)} />
+              </div>
+              <div className="space-y-2 rounded-xl border border-white/10 bg-black/10 p-3">
+                <p className="text-[11px] font-black uppercase tracking-wide text-slate-300">End keyframe</p>
+                <RangeControl label="Zoom" value={to.zoom ?? 1} min={1} max={2.5} unit="×" onChange={(value) => patchMotion("to", "zoom", value)} />
+                <RangeControl label="Horizontal" value={to.x ?? 0} min={-10} max={10} unit="%" onChange={(value) => patchMotion("to", "x", value)} />
+                <RangeControl label="Vertical" value={to.y ?? 0} min={-10} max={10} unit="%" onChange={(value) => patchMotion("to", "y", value)} />
+              </div>
+              <label className="block text-[11px] font-bold text-slate-300">
+                Motion easing
+                <select
+                  value={motion.easing || "easeInOut"}
+                  onChange={(event) => editClip(clip.id, { motion: { ...motion, easing: event.target.value } })}
+                  className="mt-1 w-full rounded-lg border border-white/10 bg-slate-900 px-2.5 py-2 text-xs text-white"
+                >
+                  <option value="linear">Linear</option>
+                  <option value="easeIn">Ease in</option>
+                  <option value="easeOut">Ease out</option>
+                  <option value="easeInOut">Ease in / out</option>
+                </select>
+              </label>
+            </>
+          )}
         </>
       )}
-    </div>
-  );
-}
 
-/* ---------- Captions ---------- */
-function CaptionsTool({ clip, editClip }) {
-  const [script, setScript] = useState("");
-  const [style, setStyle] = useState({ pos: "bottom", size: "md", color: "#ffffff" });
-  const captions = clip.captions || [];
-  const len = Math.max(0.1, (clip.end - clip.start) / (clip.speed || 1));
-
-  const autoTime = () => {
-    const words = script.trim().split(/\s+/).filter(Boolean);
-    if (!words.length) return;
-    const lines = [];
-    for (let i = 0; i < words.length; i += 6) lines.push(words.slice(i, i + 6).join(" "));
-    const step = len / lines.length;
-    editClip(clip.id, { captions: lines.map((text, i) => ({ t0: +(i * step).toFixed(2), t1: +((i + 1) * step).toFixed(2), text })), captionStyle: style });
-  };
-  const update = (i, patch) => editClip(clip.id, { captions: captions.map((c, j) => (j === i ? { ...c, ...patch } : c)) });
-
-  return (
-    <div className="space-y-3">
-      <p className="text-xs font-black">Captions</p>
-      <textarea rows={4} className={input} placeholder="Script/dialogue paste cheyandi. 6 words ki oka line ga auto-time avthundi." value={script} onChange={(e) => setScript(e.target.value)} />
-      <div className="flex flex-wrap gap-1.5">
-        {["top", "middle", "bottom"].map((p) => <button key={p} type="button" className={pill(style.pos === p)} onClick={() => setStyle({ ...style, pos: p })}>{p}</button>)}
-        {["#ffffff", "#fde68a", "#86efac", "#f9a8d4"].map((c) => <button key={c} type="button" aria-label={c} onClick={() => setStyle({ ...style, color: c })} className="h-6 w-6 rounded-full border border-white/30" style={{ background: c, outline: style.color === c ? "2px solid #a78bfa" : "none" }} />)}
-      </div>
-      <button type="button" className={btn} disabled={!script.trim()} onClick={autoTime}>Auto-time across clip</button>
-      <div className="space-y-1.5">
-        {captions.map((c, i) => (
-          <div key={i} className="grid grid-cols-[52px_52px_1fr] items-center gap-1.5">
-            <input type="number" step="0.1" className={input} value={c.t0} onChange={(e) => update(i, { t0: Number(e.target.value) })} />
-            <input type="number" step="0.1" className={input} value={c.t1} onChange={(e) => update(i, { t1: Number(e.target.value) })} />
-            <input className={input} value={c.text} onChange={(e) => update(i, { text: e.target.value })} />
+      {tool === "beat" && (
+        <>
+          <div>
+            <p className="text-sm font-black text-white">Beat accents</p>
+            <p className="mt-1 text-[11px] leading-relaxed text-slate-400">
+              Use the imported track waveform to place short flash effects on prominent beats.
+            </p>
           </div>
-        ))}
-        {!captions.length && <p className="text-[11px] text-slate-400">Captions ledu. Script paste chesi auto-time cheyandi.</p>}
-      </div>
-      <p className="text-[11px] text-slate-400">Idi script/manual timing. Speech-to-text auto captions kaadu.</p>
-    </div>
+          <button
+            type="button"
+            disabled={!audio.some((track) => track.peaks?.length)}
+            onClick={onAddBeatEffects}
+            className="w-full rounded-xl bg-gradient-to-r from-fuchsia-600 to-violet-600 px-3 py-2.5 text-xs font-black text-white transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Add beat-synced flashes
+          </button>
+          {!audio.length && <p className="text-[11px] text-slate-400">Import a song first from the Music tab.</p>}
+        </>
+      )}
+
+      {tool === "captions" && (
+        <>
+          <div>
+            <p className="text-sm font-black text-white">Caption studio</p>
+            <p className="mt-1 text-[11px] leading-relaxed text-slate-400">
+              Add a timed, animated caption at the current playhead.
+            </p>
+          </div>
+          <textarea
+            value={caption}
+            onChange={(event) => setCaption(event.target.value)}
+            maxLength={180}
+            rows={3}
+            placeholder="Type a caption…"
+            className="w-full resize-y rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-xs text-white placeholder:text-slate-500"
+          />
+          <div className="flex items-center justify-between text-[10px] text-slate-500">
+            <span>Lower-third · slide-up motion</span>
+            <span>{caption.length}/180</span>
+          </div>
+          <button
+            type="button"
+            disabled={!caption.trim()}
+            onClick={() => {
+              onAddCaption?.({ text: caption.trim(), duration: clamp(Number(renderOpts.captionDuration) || 3, 0.5, 10) });
+              setCaption("");
+            }}
+            className="w-full rounded-xl bg-gradient-to-r from-violet-600 to-cyan-600 px-3 py-2.5 text-xs font-black text-white transition hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Add caption at playhead
+          </button>
+          <RangeControl
+            label="Caption duration"
+            value={Number(renderOpts.captionDuration) || 3}
+            min={0.5}
+            max={10}
+            step={0.5}
+            unit=" s"
+            onChange={(captionDuration) => setRenderOpts((current) => ({ ...current, captionDuration }))}
+          />
+        </>
+      )}
+
+      {tool === "export" && (
+        <>
+          <div>
+            <p className="text-sm font-black text-white">Export framing</p>
+            <p className="mt-1 text-[11px] leading-relaxed text-slate-400">
+              Choose a canvas shape for the next render. The top Render button uses these settings.
+            </p>
+          </div>
+          <div className="grid grid-cols-2 gap-2">
+            {ASPECTS.map(([ratio, label]) => (
+              <ActionButton
+                key={ratio}
+                active={(renderOpts.aspect || "16:9") === ratio}
+                onClick={() => setRenderOpts((current) => ({ ...current, aspect: ratio }))}
+              >
+                <span className="block">{label}</span>
+                <span className="mt-0.5 block text-[10px] font-medium text-slate-400">{ratio}</span>
+              </ActionButton>
+            ))}
+          </div>
+          <div className="rounded-xl border border-white/10 bg-black/10 p-3 text-[11px] text-slate-300">
+            Timeline length: <strong className="text-white">{Number(totalSec || 0).toFixed(1)} s</strong>
+            <span className="mt-1 block text-slate-500">Resolution and frame rate are available in the studio toolbar.</span>
+          </div>
+        </>
+      )}
+    </section>
   );
 }
-
-/* ---------- Export settings ---------- */
-function ExportTool({ totalSec }) {
-  const [res, setRes] = useState(RESOLUTIONS[1]);
-  const [fps, setFps] = useState(30);
-  const [mbps, setMbps] = useState(RESOLUTIONS[1].mbps);
-  const [format, setFormat] = useState("mp4");
-  const sizeMb = (mbps * totalSec) / 8;
-
-  const pickRes = (r) => { setRes(r); setMbps(r.mbps); };
-  return (
-    <div className="space-y-3">
-      <p className="text-xs font-black">Export</p>
-      <div className="flex flex-wrap gap-1.5">
-        {RESOLUTIONS.map((r) => <button key={r.label} type="button" className={pill(res.label === r.label)} onClick={() => pickRes(r)}>{r.label}</button>)}
-      </div>
-      <div className="flex flex-wrap gap-1.5">
-        {[24, 30, 60].map((f) => <button key={f} type="button" className={pill(fps === f)} onClick={() => setFps(f)}>{f} fps</button>)}
-        {["mp4", "webm", "mov"].map((f) => <button key={f} type="button" className={pill(format === f)} onClick={() => setFormat(f)}>{f.toUpperCase()}</button>)}
-      </div>
-      <label className="block text-[11px] font-bold text-slate-300">
-        Bitrate: {mbps} Mbps
-        <input type="range" min={2} max={50} step={1} value={mbps} onChange={(e) => setMbps(Number(e.target.value))} className="mt-1 w-full accent-violet-500" />
-      </label>
-      <div className="rounded-lg bg-white/5 p-2.5 text-[11px] text-slate-300">
-        <div>Output: {res.w}×{res.h} · {fps}fps · {format.toUpperCase()}</div>
-        <div>Length: {totalSec.toFixed(1)}s</div>
-        <div className="font-black text-violet-300">Estimated size: ~{sizeMb.toFixed(1)} MB</div>
-      </div>
-    </div>
-  );
-}
-
-function VfxToolPanel({ tool, clip, editClip, totalSec = 0 }) {
-  if (tool === "beat") return <BeatTool />;
-  if (tool === "export") return <ExportTool totalSec={totalSec} />;
-  if (!clip) return <p className="text-[11px] text-slate-400">Import and select a clip first.</p>;
-  if (tool === "keys") return <KeyframesTool clip={clip} editClip={editClip} />;
-  if (tool === "captions") return <CaptionsTool clip={clip} editClip={editClip} />;
-  return null;
-}
-
-export { VfxToolPanel };
-export default VfxToolPanel;

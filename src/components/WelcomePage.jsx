@@ -1,20 +1,24 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import PlotCraftFX from "./PlotCraftFX";
 import PlotCraftDesign from "./PlotCraftDesign";
+import FeaturedCreations from "./FeaturedCreations";
+import VoiceInputButton from "./VoiceInputButton";
 import {
   ArrowRight,
   ArrowUpRight,
   Check,
   Copy,
-  Layers,
   Moon,
   Search,
   Share2,
   Sparkles,
   Sun,
   X,
+  Volume2,
+  VolumeX,
   Zap,
 } from "lucide-react";
+import { isSpeechSupported } from "../services/speech";
 
 const API_BASE =
   (typeof window !== "undefined" && window.PLOTCRAFT_API_BASE) ||
@@ -84,6 +88,26 @@ const ALL_TOOLS = TOOL_GROUPS.flatMap((g) =>
   g.tools.map((name) => ({ name, group: g.title }))
 );
 const TOOL_COUNT = ALL_TOOLS.length;
+
+const resolveCopilotTool = (prompt) => {
+  const text = prompt.toLowerCase();
+  if (/\b(video|movie|film|reel|animation|vfx|clip|motion)\b/.test(text)) {
+    return "AI Video Generator";
+  }
+  if (/\b(song|music|lyrics|audio|melody|soundtrack)\b/.test(text)) {
+    return "AI Chat";
+  }
+  if (/\b(edit|crop|resize|retouch|document|pdf|spreadsheet|file)\b/.test(text)) {
+    return "Files Editor";
+  }
+  if (/\b(image|photo|picture|illustration|logo|thumbnail|poster|artwork|draw|painting)\b/.test(text)) {
+    return "AI Image Generator";
+  }
+  if (/\b(story|stories|horror|romance|fantasy|novel|tale)\b|కథ|హారర్|[\u0c00-\u0c7f]/.test(text)) {
+    return "Story & Writing";
+  }
+  return "AI Chat";
+};
 
 const STUDIO_MODES = [
   {
@@ -189,6 +213,7 @@ const STEPS = [
 ];
 
 const QUICK_QUERIES = ["video", "story", "image", "chat", "music", "math"];
+const SEARCH_RESULT_LIMIT = 7;
 
 function PlotCraftLogo({ isLight }) {
   return (
@@ -278,24 +303,11 @@ function PlotCraftLogo({ isLight }) {
 
 /* Jumping Dot + Next Content Display */
 function DotJumpStage({ triggerKey, children, className = "" }) {
-  const [phase, setPhase] = useState("idle"); // 'idle' | 'jumping' | 'shown'
-
-  useEffect(() => {
-    if (triggerKey === 0) {
-      setPhase("shown");
-      return;
-    }
-    setPhase("jumping");
-    const t = setTimeout(() => {
-      setPhase("shown");
-    }, 340);
-    return () => clearTimeout(t);
-  }, [triggerKey]);
-
   return (
     <div className={`relative ${className}`}>
-      {phase === "jumping" && (
+      {triggerKey > 0 && (
         <div
+          key={`hopper-${triggerKey}`}
           aria-hidden="true"
           className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center"
         >
@@ -303,13 +315,8 @@ function DotJumpStage({ triggerKey, children, className = "" }) {
         </div>
       )}
       <div
-        className={
-          phase === "jumping"
-            ? "wx-dot-wait"
-            : triggerKey > 0
-            ? "wx-dot-reveal"
-            : ""
-        }
+        key={`content-${triggerKey}`}
+        className={triggerKey > 0 ? "wx-dot-reveal" : ""}
       >
         {children}
       </div>
@@ -371,6 +378,25 @@ const CSS = `
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   transition: background-color 0.65s var(--wx-ease), color 0.55s var(--wx-ease);
+}
+.wx::before {
+  content: "";
+  position: fixed;
+  inset: -18%;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.58;
+  background:
+    radial-gradient(38rem 34rem at 12% 18%, color-mix(in srgb, var(--wx-glow-a) 20%, transparent), transparent 72%),
+    radial-gradient(34rem 30rem at 86% 32%, color-mix(in srgb, var(--wx-glow-b) 18%, transparent), transparent 72%),
+    radial-gradient(30rem 28rem at 52% 88%, color-mix(in srgb, var(--wx-accent) 10%, transparent), transparent 74%);
+  background-size: cover;
+  animation: wxAmbientDrift 32s ease-in-out infinite alternate;
+  transform: translateZ(0);
+}
+@keyframes wxAmbientDrift {
+  from { transform: translate3d(-1%, -1%, 0) scale(1); }
+  to { transform: translate3d(1%, 1%, 0) scale(1.04); }
 }
 
 .wx.wx-light {
@@ -483,6 +509,130 @@ const CSS = `
   font-size: clamp(3.2rem, 11.4vw, 8.6rem);
   line-height: 0.92;
   letter-spacing: -0.045em;
+}
+.wx-hero-preview {
+  position: relative;
+  isolation: isolate;
+  animation: wxPreviewArrive 1s .12s var(--wx-ease) both;
+}
+.wx-hero-preview::before {
+  position: absolute;
+  z-index: -1;
+  inset: -5% -3%;
+  border: 1px solid color-mix(in srgb, var(--wx-accent) 18%, transparent);
+  border-radius: 30px;
+  transform: rotate(1.5deg);
+  box-shadow: 0 18px 48px -36px color-mix(in srgb, var(--wx-accent) 55%, transparent);
+}
+.wx-hero-preview::after {
+  content: "";
+  position: absolute;
+  z-index: 2;
+  top: -12px;
+  right: 18px;
+  padding: 6px 10px;
+  border: 1px solid color-mix(in srgb, var(--wx-accent) 28%, var(--wx-border));
+  border-radius: 999px;
+  background: var(--wx-panel-bg);
+  color: var(--wx-accent);
+  content: "LIVE · CREATIVE STUDIO";
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: .12em;
+  box-shadow: 0 8px 22px -14px rgba(15, 23, 42, .45);
+}
+.wx-preview-surface {
+  animation: wxPreviewFloat 8s ease-in-out 1s infinite;
+}
+@keyframes wxPreviewArrive {
+  from { opacity: 0; transform: translateY(28px) scale(.97); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes wxPreviewFloat {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-7px); }
+}
+.wx-launch-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  pointer-events: none;
+  color: var(--wx-ink);
+  background:
+    radial-gradient(ellipse at 50% 45%, color-mix(in srgb, var(--wx-accent) 18%, transparent), transparent 56%),
+    var(--wx-bg);
+  clip-path: circle(0 at 50% 50%);
+  opacity: 0;
+}
+.wx-launch-overlay.is-active {
+  animation: wxLaunchReveal .68s cubic-bezier(.76, 0, .24, 1) forwards;
+  pointer-events: all;
+}
+@keyframes wxLaunchReveal {
+  0% { clip-path: circle(0 at 50% 50%); opacity: 1; }
+  75% { clip-path: circle(100vmax at 50% 50%); opacity: 1; }
+  100% { clip-path: circle(100vmax at 50% 50%); opacity: 1; }
+}
+.wx-launch-content {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  text-align: center;
+  opacity: 0;
+  transform: translateY(12px) scale(.96);
+}
+.wx-launch-overlay.is-active .wx-launch-content {
+  animation: wxLaunchContent .38s .16s var(--wx-ease) forwards;
+}
+@keyframes wxLaunchContent {
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.wx-launch-mark {
+  display: grid;
+  width: 58px;
+  height: 58px;
+  place-items: center;
+  border: 1px solid color-mix(in srgb, var(--wx-accent) 35%, transparent);
+  border-radius: 20px;
+  background: color-mix(in srgb, var(--wx-accent) 12%, var(--wx-bg));
+  color: var(--wx-accent);
+  box-shadow: 0 12px 40px -18px color-mix(in srgb, var(--wx-accent) 75%, transparent);
+  animation: wxLaunchPulse 1s ease-in-out infinite alternate;
+}
+@keyframes wxLaunchPulse {
+  to { transform: translateY(-3px) scale(1.04); box-shadow: 0 18px 46px -18px color-mix(in srgb, var(--wx-accent) 85%, transparent); }
+}
+.wx-launch-title { font-size: clamp(20px, 4vw, 28px); font-weight: 900; letter-spacing: -.035em; }
+.wx-launch-subtitle { color: var(--wx-muted); font-size: 13px; }
+.wx-launch-track {
+  width: min(220px, 60vw);
+  height: 3px;
+  margin-top: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--wx-accent) 16%, transparent);
+}
+.wx-launch-track span {
+  display: block;
+  width: 42%;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--wx-accent), #ec4899, #f59e0b);
+  animation: wxLaunchProgress .6s var(--wx-ease) forwards;
+}
+@keyframes wxLaunchProgress { to { transform: translateX(140%); } }
+.wx-scroll-progress {
+  position: absolute;
+  inset: auto 0 -1px;
+  height: 2px;
+  transform: scaleX(0);
+  transform-origin: left center;
+  background: linear-gradient(90deg, var(--wx-accent), #ec4899 55%, #f59e0b);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--wx-accent) 48%, transparent);
+  pointer-events: none;
 }
 .wx-line {
   display: block;
@@ -785,6 +935,18 @@ const CSS = `
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .wx::before,
+  .wx-hero-preview,
+  .wx-preview-surface {
+    animation: none !important;
+  }
+  .wx-launch-overlay.is-active,
+  .wx-launch-overlay.is-active .wx-launch-content,
+  .wx-launch-mark,
+  .wx-launch-track span { animation: none !important; }
+  .wx-launch-overlay.is-active { clip-path: none; opacity: 1; }
+  .wx-launch-content { opacity: 1; transform: none; }
+  .wx-hero-preview { opacity: 1; transform: none; }
   .wx-line > span,
   .wx-marquee,
   .wx-ripple.fire,
@@ -807,7 +969,157 @@ const CSS = `
   .wx-spotlight, .wx-grid, .wx-ripple { display: none; }
   .wx-row::before, .wx-link, .wx-cta, .wx-arrow, .wx-theme-logo, .wx-theme-icon, .wx-panel, .wx-well { transition: none; }
 }
+@media (max-width: 767px) {
+  .wx .pcfx-dock-btn { display: none; }
+  .wx-hero-preview::before { inset: -3% -1%; }
+  .wx-hero-preview::after { top: -10px; right: 12px; font-size: 8px; }
+}
 `;
+
+
+const ROUTES = ["home", "features", "tools", "workflow", "reviews"];
+const readRoute = () => {
+  if (typeof window === "undefined") return "home";
+  const r = window.location.hash.replace(/^#\/?/, "").toLowerCase();
+  return ROUTES.includes(r) ? r : "home";
+};
+
+const WXP_CSS = `
+.wxp-page { position: relative; isolation: isolate; min-height: 70vh; animation: wxpIn .8s cubic-bezier(.16,1,.3,1) both; }
+@keyframes wxpIn { from { opacity: 0; transform: translateY(24px); filter: blur(6px); } to { opacity: 1; transform: none; filter: none; } }
+.wxp-orb { position: absolute; width: 380px; height: 380px; border-radius: 50%; filter: blur(90px); opacity: .3; z-index: -1; pointer-events: none; animation: wxpFloat 14s ease-in-out infinite alternate; }
+@keyframes wxpFloat { from { transform: translate3d(-3%, -2%, 0); } to { transform: translate3d(4%, 5%, 0) scale(1.1); } }
+.wxp-back { display: inline-flex; align-items: center; gap: 8px; padding: 9px 16px; border-radius: 999px; border: 1px solid rgba(127,127,127,.3); background: rgba(127,127,127,.06); font-size: 13px; font-weight: 700; cursor: pointer; transition: transform .35s cubic-bezier(.16,1,.3,1), background .3s ease; }
+.wxp-back:hover { transform: translateX(-4px); background: rgba(127,127,127,.14); }
+.wxp-eyebrow { margin-top: 30px; font-size: 11px; letter-spacing: .3em; text-transform: uppercase; font-weight: 800; opacity: .7; animation: wxpIn .6s .1s both; }
+.wxp-title { margin-top: 10px; font-size: clamp(2.2rem, 6vw, 4.8rem); font-weight: 900; letter-spacing: -.04em; line-height: 1.02;
+  background: linear-gradient(100deg, #7c3aed, #db2777, #f59e0b, #7c3aed); background-size: 250% 100%; -webkit-background-clip: text; background-clip: text; color: transparent;
+  animation: wxpIn .8s .15s both, wxpShine 8s linear infinite; }
+@keyframes wxpShine { from { background-position: 0% 50%; } to { background-position: 250% 50%; } }
+.wxp-sub { margin-top: 12px; font-size: 16px; opacity: .75; max-width: 560px; animation: wxpIn .7s .25s both; }
+.wxp-progress { height: 3px; border-radius: 3px; margin: 26px 0 36px; background: rgba(127,127,127,.2); overflow: hidden; }
+.wxp-progress span { display: block; height: 100%; background: linear-gradient(90deg, #7c3aed, #db2777); transform-origin: left; animation: wxpGrow 1.1s .3s cubic-bezier(.16,1,.3,1) both; }
+@keyframes wxpGrow { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+.wxp-grid { display: grid; gap: 18px; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+.wxp-card { padding: 24px; border-radius: 24px; border: 1px solid rgba(127,127,127,.2); background: rgba(127,127,127,.06); backdrop-filter: blur(14px); display: flex; flex-direction: column; gap: 10px;
+  animation: wxpRise .8s var(--d, 0ms) cubic-bezier(.16,1,.3,1) backwards;
+  transition: transform .45s cubic-bezier(.16,1,.3,1), box-shadow .45s ease, border-color .45s ease; }
+.wxp-card:hover { transform: translateY(-6px) scale(1.01); box-shadow: 0 30px 60px -30px rgba(124,58,237,.55); border-color: rgba(124,58,237,.45); }
+@keyframes wxpRise { from { opacity: 0; transform: translateY(30px) scale(.96); } to { opacity: 1; transform: none; } }
+.wxp-num { font-family: ui-monospace, monospace; font-size: 12px; opacity: .6; }
+.wxp-card h3 { font-size: 22px; font-weight: 900; letter-spacing: -.02em; }
+.wxp-badge { font-size: 11px; font-weight: 800; letter-spacing: .12em; text-transform: uppercase; color: #a78bfa; }
+.wxp-go { margin-top: auto; align-self: flex-start; font-size: 13px; font-weight: 800; color: #a78bfa; background: none; border: 0; cursor: pointer; transition: transform .35s cubic-bezier(.16,1,.3,1), color .3s ease; }
+.wxp-go:hover { transform: translateX(4px); color: #f0abfc; }
+.wxp-group { margin-top: 36px; }
+.wxp-group h2 { font-size: 12px; letter-spacing: .25em; text-transform: uppercase; font-weight: 800; opacity: .7; margin-bottom: 14px; }
+.wxp-tools { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
+.wxp-tool { display: flex; justify-content: space-between; align-items: center; padding: 16px 18px; border-radius: 18px; border: 1px solid rgba(127,127,127,.22); background: rgba(127,127,127,.05); font-size: 14px; font-weight: 700; cursor: pointer; text-align: left;
+  animation: wxpRise .7s var(--d, 0ms) cubic-bezier(.16,1,.3,1) backwards; transition: transform .35s cubic-bezier(.16,1,.3,1), background .3s ease, border-color .3s ease; }
+.wxp-tool:hover { transform: translateY(-3px); background: linear-gradient(120deg, rgba(124,58,237,.18), rgba(219,39,119,.12)); border-color: rgba(124,58,237,.5); }
+.wxp-arrow { transition: transform .4s cubic-bezier(.16,1,.3,1); }
+.wxp-tool:hover .wxp-arrow { transform: translateX(5px); }
+.wxp-steps { list-style: none; padding: 0; margin: 0; display: grid; gap: 18px; }
+@media (min-width: 768px) { .wxp-steps { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+.wxp-step { padding: 26px; border-radius: 24px; border: 1px solid rgba(127,127,127,.2); background: rgba(127,127,127,.06); display: flex; flex-direction: column; gap: 10px; animation: wxpRise .8s var(--d, 0ms) cubic-bezier(.16,1,.3,1) backwards; }
+.wxp-stepno { font-family: ui-monospace, monospace; font-size: 12px; opacity: .6; }
+.wxp-step h3 { font-size: 22px; font-weight: 900; letter-spacing: -.02em; }
+.wxp-cta { margin-top: 52px; }
+.wxp-cta button { padding: 16px 28px; border-radius: 14px; font-size: 15px; font-weight: 900; color: #fff; border: 0; cursor: pointer; background: linear-gradient(120deg, #7c3aed, #db2777); box-shadow: 0 18px 40px -16px rgba(124,58,237,.7); transition: transform .35s cubic-bezier(.16,1,.3,1), box-shadow .35s ease; }
+.wxp-cta button:hover { transform: translateY(-3px); box-shadow: 0 28px 50px -18px rgba(124,58,237,.8); }
+.wxp-wipe { position: fixed; inset: 0; z-index: 60; pointer-events: none; background: linear-gradient(100deg, #7c3aed, #db2777 60%, #f59e0b); animation: wxpWipe .9s cubic-bezier(.7,0,.2,1) both; }
+@keyframes wxpWipe { 0% { transform: translateX(-101%); } 45% { transform: translateX(0); } 100% { transform: translateX(101%); } }
+@media (prefers-reduced-motion: reduce) { .wxp-page, .wxp-page *, .wxp-wipe { animation: none !important; transition: none !important; } }
+`;
+
+function RoutePage({ route, onBack, onLaunch, reviews }) {
+  const meta = {
+    features: { eyebrow: "Features", title: "Everything you need to create.", sub: "Each studio, one click away." },
+    tools: { eyebrow: "Tools", title: `${TOOL_COUNT} tools in five groups.`, sub: "Pick a tool and jump straight into its studio." },
+    workflow: { eyebrow: "How it works", title: "From idea to finished piece.", sub: "Three steps. No setup." },
+    reviews: { eyebrow: "In their words", title: "Loved by creators.", sub: "What people say after making their first piece." },
+  }[route];
+  if (!meta) return null;
+  return (
+    <section key={route} className="wxp-page px-4 sm:px-8 lg:px-14 pt-10 sm:pt-14 pb-24">
+      <style>{WXP_CSS}</style>
+      <span className="wxp-orb" style={{ background: "#7c3aed", left: "-8%", top: "-6%" }} aria-hidden="true" />
+      <span className="wxp-orb" style={{ background: "#db2777", right: "-6%", top: "12%", animationDelay: "-6s" }} aria-hidden="true" />
+
+      <button type="button" onClick={onBack} className="wxp-back">← Back to home</button>
+      <p className="wxp-eyebrow">{meta.eyebrow}</p>
+      <h1 className="wxp-title">{meta.title}</h1>
+      <p className="wxp-sub">{meta.sub}</p>
+      <div className="wxp-progress"><span /></div>
+
+      {route === "features" && (
+        <div className="wxp-grid">
+          {FEATURES.map((f, i) => (
+            <article key={f.n} className="wxp-card" style={{ "--d": `${i * 90}ms` }}>
+              <span className="wxp-num">{f.n}</span>
+              <h3>{f.title}</h3>
+              <p className="wxp-badge">{f.badge}</p>
+              <p className="opacity-80">{f.text}</p>
+              <p className="text-sm italic opacity-60">{f.samplePrompt}</p>
+              <button type="button" onClick={() => onLaunch(f.tool)} className="wxp-go">Open {f.tool} →</button>
+            </article>
+          ))}
+        </div>
+      )}
+
+      {route === "tools" && TOOL_GROUPS.map((g, gi) => (
+        <div key={g.title} className="wxp-group">
+          <h2>{g.title}</h2>
+          <div className="wxp-grid wxp-tools">
+            {g.tools.map((name, i) => (
+              <button key={name} type="button" onClick={() => onLaunch(name)} className="wxp-tool" style={{ "--d": `${(gi * 4 + i) * 50}ms` }}>
+                <span>{name}</span>
+                <span className="wxp-arrow">→</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ))}
+
+      {route === "workflow" && (
+        <ol className="wxp-steps">
+          {STEPS.map((s, i) => {
+            const Icon = s.icon;
+            return (
+              <li key={s.n} className="wxp-step" style={{ "--d": `${i * 140}ms` }}>
+                <span className="wxp-stepno">Step {s.n}</span>
+                <Icon className="w-5 h-5" />
+                <h3>{s.title}</h3>
+                <p className="opacity-80">{s.text}</p>
+              </li>
+            );
+          })}
+        </ol>
+      )}
+
+      {route === "reviews" && (
+        <div className="wxp-grid">
+          {(reviews || []).length === 0 ? (
+            <p className="opacity-70">No reviews yet. Be the first to share your experience.</p>
+          ) : (
+            reviews.map((r, i) => (
+              <figure key={r.id || i} className="wxp-card" style={{ "--d": `${i * 80}ms` }}>
+                <blockquote className="font-serif italic text-lg leading-snug">“{r.comment}”</blockquote>
+                <figcaption className="mt-auto text-xs opacity-70">
+                  {r.name} · <span className="text-amber-500">{"★".repeat(Math.min(5, Math.max(1, Number(r.rating) || 5)))}</span>
+                </figcaption>
+              </figure>
+            ))
+          )}
+        </div>
+      )}
+
+      <div className="wxp-cta">
+        <button type="button" onClick={() => onLaunch()}>Start creating →</button>
+      </div>
+    </section>
+  );
+}
 
 export default function WelcomePage({ onExplore, onSelectTool }) {
   const [theme, setTheme] = useState(() => {
@@ -821,6 +1133,22 @@ export default function WelcomePage({ onExplore, onSelectTool }) {
   const [rippleKey, setRippleKey] = useState(0);
   const [leaving, setLeaving] = useState(false);
   const [stats, setStats] = useState(null);
+  const [route, setRoute] = useState(readRoute);
+  const [wipeKey, setWipeKey] = useState(0);
+  useEffect(() => {
+    const onHash = () => {
+      setRoute(readRoute());
+      setWipeKey((k) => k + 1);
+      const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+      window.scrollTo({ top: 0, behavior: reduceMotion ? "auto" : "smooth" });
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+  const goRoute = (r) => {
+    const target = ROUTES.includes(r) ? r : "home";
+    window.location.hash = target === "home" ? "/" : `/${target}`;
+  };
   const [reviews, setReviews] = useState([]);
 
   // Shared live search state across Header & Hero
@@ -838,9 +1166,15 @@ export default function WelcomePage({ onExplore, onSelectTool }) {
   const [featurePaperTick, setFeaturePaperTick] = useState(0);
 
   const [copiedPrompt, setCopiedPrompt] = useState(false);
-  const [spot, setSpot] = useState({ x: -999, y: -999, visible: false });
+  const [copyError, setCopyError] = useState(false);
+  const [copilotOpen, setCopilotOpen] = useState(false);
+  const [copilotPrompt, setCopilotPrompt] = useState("");
+  const [voiceReplies, setVoiceReplies] = useState(false);
+  const copilotTarget = copilotPrompt.trim() ? resolveCopilotTool(copilotPrompt) : "";
 
   const rootRef = useRef(null);
+  const spotlightRef = useRef(null);
+  const progressRef = useRef(null);
   const navInputRef = useRef(null);
   const navDropdownRef = useRef(null);
   const heroInputRef = useRef(null);
@@ -884,19 +1218,25 @@ export default function WelcomePage({ onExplore, onSelectTool }) {
   useEffect(() => {
     const onKeyDown = (e) => {
       const tag = e.target?.tagName?.toLowerCase();
-      const isTyping = tag === "input" || tag === "textarea";
+      const isTyping = ["input", "textarea", "select"].includes(tag) || e.target?.isContentEditable;
 
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
         setNavSearchOpen(true);
-        navInputRef.current?.focus();
+        const visibleInput = [navInputRef.current, heroInputRef.current].find(
+          (input) => input && input.getClientRects().length > 0
+        );
+        (visibleInput || heroInputRef.current || navInputRef.current)?.focus();
         return;
       }
 
       if (e.key === "/" && !e.metaKey && !e.ctrlKey && !e.altKey && !isTyping) {
         e.preventDefault();
         setNavSearchOpen(true);
-        navInputRef.current?.focus();
+        const visibleInput = [navInputRef.current, heroInputRef.current].find(
+          (input) => input && input.getClientRects().length > 0
+        );
+        (visibleInput || heroInputRef.current || navInputRef.current)?.focus();
         return;
       }
 
@@ -949,36 +1289,73 @@ export default function WelcomePage({ onExplore, onSelectTool }) {
 
     els.forEach((el) => io.observe(el));
     return () => io.disconnect();
-  }, [activeGroup, reviews.length]);
+  }, [activeGroup, reviews.length, route]);
+
+  useEffect(() => {
+    const progress = progressRef.current;
+    if (!progress) return undefined;
+    let frame = 0;
+    const updateProgress = () => {
+      frame = 0;
+      const root = document.documentElement;
+      const scrollable = root.scrollHeight - window.innerHeight;
+      const ratio = scrollable > 0 ? Math.min(1, Math.max(0, window.scrollY / scrollable)) : 0;
+      progress.style.transform = `scaleX(${ratio})`;
+    };
+    const scheduleUpdate = () => {
+      if (!frame) frame = window.requestAnimationFrame(updateProgress);
+    };
+    updateProgress();
+    window.addEventListener("scroll", scheduleUpdate, { passive: true });
+    window.addEventListener("resize", scheduleUpdate);
+    return () => {
+      window.removeEventListener("scroll", scheduleUpdate);
+      window.removeEventListener("resize", scheduleUpdate);
+      if (frame) window.cancelAnimationFrame(frame);
+    };
+  }, [route, reviews.length]);
 
   const toggleTheme = () => {
     setTheme((prev) => (prev === "dark" ? "light" : "dark"));
     setRippleKey((k) => k + 1);
   };
 
-  const launchApp = (toolName = null) => {
+  const launchApp = (toolName = null, promptText = "", speakReplies = false) => {
     if (leaving) return;
     setNavSearchOpen(false);
     setLeaving(true);
+    const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
     navTimerRef.current = setTimeout(() => {
       if (toolName && typeof onSelectTool === "function") {
-        onSelectTool(toolName);
+        onSelectTool(toolName, promptText, speakReplies);
       } else if (typeof onExplore === "function") {
-        onExplore(toolName || undefined);
+        onExplore(toolName || undefined, promptText, speakReplies);
       }
-    }, 480);
+    }, reduceMotion ? 0 : 680);
   };
 
-  const scrollTo = (id) => {
-    document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  const handleCopilotSubmit = (event) => {
+    event.preventDefault();
+    const prompt = copilotPrompt.trim();
+    if (!prompt) return;
+    launchApp(resolveCopilotTool(prompt), prompt, voiceReplies);
+  };
+
+  const selectCopilotExample = (prompt) => {
+    setCopilotPrompt(prompt);
+    launchApp(resolveCopilotTool(prompt), prompt, voiceReplies);
   };
 
   const handleMouseMove = (e) => {
-    setSpot({ x: e.clientX, y: e.clientY, visible: true });
+    const spotlight = spotlightRef.current;
+    if (!spotlight) return;
+    spotlight.style.left = `${e.clientX}px`;
+    spotlight.style.top = `${e.clientY}px`;
+    spotlight.style.opacity = "1";
   };
 
   const handleMouseLeave = () => {
-    setSpot((prev) => ({ ...prev, visible: false }));
+    if (spotlightRef.current) spotlightRef.current.style.opacity = "0";
   };
 
   const handleSelectMode = (id) => {
@@ -986,6 +1363,8 @@ export default function WelcomePage({ onExplore, onSelectTool }) {
     setActiveModeId(id);
     setModeDotTick((t) => t + 1);
     setCopiedPrompt(false);
+    setCopyError(false);
+    setCopyError(false);
   };
 
   const handleSelectFeature = (idx) => {
@@ -1005,16 +1384,22 @@ export default function WelcomePage({ onExplore, onSelectTool }) {
     [activeModeId]
   );
 
-  const handleCopyPrompt = () => {
-    if (!activeMode?.prompt || typeof navigator === "undefined" || !navigator.clipboard) return;
-    navigator.clipboard
-      .writeText(activeMode.prompt)
-      .then(() => {
-        setCopiedPrompt(true);
-        if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
-        copyTimerRef.current = setTimeout(() => setCopiedPrompt(false), 1800);
-      })
-      .catch(() => {});
+  const handleCopyPrompt = async () => {
+    if (!activeMode?.prompt) return;
+    if (copyTimerRef.current) clearTimeout(copyTimerRef.current);
+    try {
+      if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable");
+      await navigator.clipboard.writeText(activeMode.prompt);
+      setCopiedPrompt(true);
+      setCopyError(false);
+    } catch {
+      setCopiedPrompt(false);
+      setCopyError(true);
+    }
+    copyTimerRef.current = setTimeout(() => {
+      setCopiedPrompt(false);
+      setCopyError(false);
+    }, 2200);
   };
 
   const trimmedQuery = query.trim().toLowerCase();
@@ -1028,21 +1413,18 @@ export default function WelcomePage({ onExplore, onSelectTool }) {
     );
   }, [trimmedQuery]);
 
-  useEffect(() => {
-    setActiveResultIdx(0);
-  }, [trimmedQuery]);
-
   const handleSearchKeyDown = (e) => {
-    if (!matchedTools.length) return;
+    const resultCount = Math.min(matchedTools.length, SEARCH_RESULT_LIMIT);
+    if (!resultCount) return;
     if (e.key === "ArrowDown") {
       e.preventDefault();
-      setActiveResultIdx((prev) => (prev + 1) % matchedTools.length);
+      setActiveResultIdx((prev) => (prev + 1) % resultCount);
     } else if (e.key === "ArrowUp") {
       e.preventDefault();
-      setActiveResultIdx((prev) => (prev - 1 + matchedTools.length) % matchedTools.length);
+      setActiveResultIdx((prev) => (prev - 1 + resultCount) % resultCount);
     } else if (e.key === "Enter") {
       e.preventDefault();
-      const target = matchedTools[activeResultIdx] || matchedTools[0];
+      const target = matchedTools[Math.min(activeResultIdx, resultCount - 1)] || matchedTools[0];
       if (target) launchApp(target.name);
     }
   };
@@ -1052,17 +1434,17 @@ export default function WelcomePage({ onExplore, onSelectTool }) {
     return TOOL_GROUPS.filter((g) => g.title === activeGroup);
   }, [activeGroup]);
 
+  const rating = Number(stats?.rating);
   const statItems = [
     { label: "Stories written", value: stats?.stories },
     { label: "Creators", value: stats?.creators },
     { label: "Chats saved", value: stats?.chats },
     {
       label: "Average rating",
-      value: stats && stats.reviews ? Number(stats.rating).toFixed(1) : null,
+      value: stats?.reviews && Number.isFinite(rating) ? rating.toFixed(1) : null,
     },
   ];
 
-  const marqueeRow = useMemo(() => [...ALL_TOOLS, ...ALL_TOOLS], []);
   const activeFeature = FEATURES[activeFeatureIdx] || FEATURES[0];
 
   return (
@@ -1092,13 +1474,10 @@ export default function WelcomePage({ onExplore, onSelectTool }) {
 
       {/* Cursor spotlight */}
       <div
+        ref={spotlightRef}
         aria-hidden="true"
         className="wx-spotlight"
-        style={{
-          left: `${spot.x}px`,
-          top: `${spot.y}px`,
-          opacity: spot.visible ? 1 : 0,
-        }}
+        style={{ left: "-999px", top: "-999px", opacity: 0 }}
       />
 
       {/* Ambient glow */}
@@ -1119,12 +1498,14 @@ export default function WelcomePage({ onExplore, onSelectTool }) {
           className="sticky top-0 z-40 px-4 sm:px-8 lg:px-14 py-3.5 backdrop-blur-xl wx-divider-b transition-colors duration-500"
           style={{ background: "var(--wx-header-bg)" }}
         >
+          <div ref={progressRef} aria-hidden="true" className="wx-scroll-progress" />
           <div className="flex items-center justify-between gap-3 sm:gap-5">
             <a
-              href="#top"
+              href="#/"
               onClick={(e) => {
                 e.preventDefault();
-                window.scrollTo({ top: 0, behavior: "smooth" });
+                if (route !== "home") goRoute("home");
+                else window.scrollTo({ top: 0, behavior: "smooth" });
               }}
               className="shrink-0 focus:outline-none"
               aria-label="PlotCraft.AI Home"
@@ -1143,6 +1524,7 @@ export default function WelcomePage({ onExplore, onSelectTool }) {
                   onFocus={() => setNavSearchOpen(true)}
                   onChange={(e) => {
                     setQuery(e.target.value);
+                    setActiveResultIdx(0);
                     setNavSearchOpen(true);
                   }}
                   onKeyDown={handleSearchKeyDown}
@@ -1160,6 +1542,7 @@ export default function WelcomePage({ onExplore, onSelectTool }) {
                     type="button"
                     onClick={() => {
                       setQuery("");
+                      setActiveResultIdx(0);
                       navInputRef.current?.focus();
                     }}
                     aria-label="Clear search"
@@ -1196,7 +1579,7 @@ export default function WelcomePage({ onExplore, onSelectTool }) {
                   </div>
                   <div className="max-h-64 overflow-y-auto divide-y divide-[var(--wx-border)]">
                     {matchedTools.length > 0 ? (
-                      matchedTools.slice(0, 7).map((item, idx) => {
+                      matchedTools.slice(0, SEARCH_RESULT_LIMIT).map((item, idx) => {
                         const isHighlighted = idx === activeResultIdx;
                         return (
                           <button
@@ -1233,17 +1616,17 @@ export default function WelcomePage({ onExplore, onSelectTool }) {
               className="hidden xl:flex items-center gap-7 text-sm wx-muted"
               aria-label="Primary"
             >
-              <button type="button" onClick={() => scrollTo("features")} className="wx-link">
+              <button type="button" onClick={() => goRoute("features")} className="wx-link">
                 Features
               </button>
-              <button type="button" onClick={() => scrollTo("tools")} className="wx-link">
+              <button type="button" onClick={() => goRoute("tools")} className="wx-link">
                 Tools
               </button>
-              <button type="button" onClick={() => scrollTo("workflow")} className="wx-link">
+              <button type="button" onClick={() => goRoute("workflow")} className="wx-link">
                 Workflow
               </button>
               {reviews.length > 0 && (
-                <button type="button" onClick={() => scrollTo("reviews")} className="wx-link">
+                <button type="button" onClick={() => goRoute("reviews")} className="wx-link">
                   Reviews
                 </button>
               )}
@@ -1253,6 +1636,8 @@ export default function WelcomePage({ onExplore, onSelectTool }) {
               <button
                 type="button"
                 onClick={() => launchApp()}
+                disabled={leaving}
+                aria-busy={leaving}
                 style={{
                   background: "var(--wx-input-bg)",
                   borderColor: "var(--wx-border-strong)",
@@ -1286,6 +1671,7 @@ export default function WelcomePage({ onExplore, onSelectTool }) {
         </header>
 
         {/* HERO */}
+        {route === "home" && (<>
         <section id="top" className="px-4 sm:px-8 lg:px-14 pt-10 sm:pt-14 lg:pt-20 pb-16 sm:pb-24">
           <div
             style={{
@@ -1322,23 +1708,22 @@ export default function WelcomePage({ onExplore, onSelectTool }) {
             {/* Left Column: Value Proposition + Dedicated Search Card */}
             <div className="lg:col-span-6 space-y-7">
               <p className="text-base sm:text-lg lg:text-xl wx-muted leading-relaxed max-w-xl">
-                Write stories, generate images and videos, compose audio, and brainstorm with an AI
-                assistant.{" "}
-                <span className="wx-ink font-semibold">{TOOL_COUNT} tools</span> in one
-                unified studio with automatic project saving.
+                One workspace for stories, visuals, video and sound—then save and share your work.
               </p>
 
               <div className="flex flex-wrap items-center gap-4 sm:gap-5">
                 <button
                   type="button"
                   onClick={() => launchApp()}
+                  disabled={leaving}
+                  aria-busy={leaving}
                   className="wx-cta rounded-xl inline-flex items-center gap-2.5 px-6 sm:px-8 py-3.5 sm:py-4 text-sm sm:text-base font-black"
                 >
                   Start creating <ArrowUpRight className="w-5 h-5" />
                 </button>
                 <button
                   type="button"
-                  onClick={() => scrollTo("tools")}
+                  onClick={() => goRoute("tools")}
                   className="wx-link text-xs sm:text-sm font-medium wx-muted"
                 >
                   Explore all {TOOL_COUNT} tools →
@@ -1366,7 +1751,10 @@ export default function WelcomePage({ onExplore, onSelectTool }) {
                     ref={heroInputRef}
                     type="text"
                     value={query}
-                    onChange={(e) => setQuery(e.target.value)}
+                    onChange={(e) => {
+                      setQuery(e.target.value);
+                      setActiveResultIdx(0);
+                    }}
                     onKeyDown={handleSearchKeyDown}
                     placeholder="Type story, video, image, chat, math..."
                     style={{
@@ -1381,6 +1769,7 @@ export default function WelcomePage({ onExplore, onSelectTool }) {
                       type="button"
                       onClick={() => {
                         setQuery("");
+                        setActiveResultIdx(0);
                         heroInputRef.current?.focus();
                       }}
                       aria-label="Clear search"
@@ -1398,7 +1787,10 @@ export default function WelcomePage({ onExplore, onSelectTool }) {
                       <button
                         key={q}
                         type="button"
-                        onClick={() => setQuery(active ? "" : q)}
+                        onClick={() => {
+                          setQuery(active ? "" : q);
+                          setActiveResultIdx(0);
+                        }}
                         style={
                           active
                             ? {
@@ -1424,7 +1816,7 @@ export default function WelcomePage({ onExplore, onSelectTool }) {
 
                 <div className="mt-4 space-y-1.5 max-h-44 overflow-y-auto pr-1">
                   {matchedTools.length > 0 ? (
-                    matchedTools.slice(0, 5).map((item) => (
+                    matchedTools.slice(0, SEARCH_RESULT_LIMIT).map((item) => (
                       <button
                         key={item.name}
                         type="button"
@@ -1447,7 +1839,10 @@ export default function WelcomePage({ onExplore, onSelectTool }) {
                       No exact match for “{query}”.{" "}
                       <button
                         type="button"
-                        onClick={() => setQuery("")}
+                        onClick={() => {
+                          setQuery("");
+                          setActiveResultIdx(0);
+                        }}
                         className="wx-accent underline font-medium"
                       >
                         Reset
@@ -1459,8 +1854,8 @@ export default function WelcomePage({ onExplore, onSelectTool }) {
             </div>
 
             {/* Right Column: Interactive Studio Stage with Light Jumping-Dot Switch */}
-            <div className="lg:col-span-6">
-              <div className="wx-panel rounded-3xl p-5 sm:p-7 space-y-6">
+            <div className="lg:col-span-6 wx-hero-preview">
+              <div className="wx-panel wx-preview-surface rounded-3xl p-5 sm:p-7 space-y-6">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <span className="text-[11px] uppercase tracking-[0.24em] wx-accent font-semibold">
                     Studio Preview
@@ -1510,6 +1905,60 @@ export default function WelcomePage({ onExplore, onSelectTool }) {
                     <p className="text-sm wx-muted leading-relaxed">{activeMode.desc}</p>
                   </div>
 
+                  <div
+                    className="relative min-h-40 sm:min-h-48 overflow-hidden rounded-2xl border wx-live-preview"
+                    style={{ borderColor: "var(--wx-border)" }}
+                    aria-label={`${activeMode.label} sample output preview`}
+                  >
+                    <div className="absolute inset-0 bg-gradient-to-br from-violet-600 via-indigo-500 to-cyan-400 opacity-90" />
+                    <div className="absolute -right-8 -top-12 h-44 w-44 rounded-full bg-white/25 blur-3xl animate-pulse" />
+                    <div className="absolute -bottom-16 -left-8 h-40 w-40 rounded-full bg-fuchsia-300/30 blur-3xl" />
+                    <div className="relative flex min-h-40 sm:min-h-48 flex-col justify-between p-4 sm:p-5 text-white">
+                      <div className="flex items-center justify-between text-[10px] font-bold uppercase tracking-[0.2em] text-white/80">
+                        <span>Interactive sample preview</span>
+                        <span className="inline-flex items-center gap-1.5">
+                          <span className="h-1.5 w-1.5 rounded-full bg-emerald-300" />
+                          {activeMode.label} mode
+                        </span>
+                      </div>
+                      {activeMode.id === "story" && (
+                        <div className="max-w-xs rounded-xl border border-white/25 bg-black/15 p-4 shadow-xl backdrop-blur-sm">
+                          <p className="text-[9px] uppercase tracking-[0.25em] text-white/70">A new chapter</p>
+                          <p className="mt-1 text-xl font-black leading-tight sm:text-2xl">Stories begin with a spark.</p>
+                          <div className="mt-3 h-1 w-16 rounded-full bg-amber-300" />
+                        </div>
+                      )}
+                      {activeMode.id === "image" && (
+                        <div className="flex items-end gap-3">
+                          <div className="h-20 w-20 rounded-[2rem] bg-gradient-to-br from-amber-200 via-rose-300 to-fuchsia-500 shadow-2xl sm:h-24 sm:w-24" />
+                          <div className="mb-2 h-14 w-14 rounded-full border border-white/50 bg-cyan-200/50 shadow-xl backdrop-blur" />
+                          <div className="mb-1 rounded-xl border border-white/20 bg-black/15 px-3 py-2 text-xs font-semibold backdrop-blur">
+                            Art direction · ready
+                          </div>
+                        </div>
+                      )}
+                      {activeMode.id === "video" && (
+                        <div className="flex items-center gap-4">
+                          <div className="grid h-14 w-14 place-items-center rounded-full border border-white/40 bg-white/15 text-sm shadow-lg backdrop-blur">
+                            Play
+                          </div>
+                          <div className="flex-1 rounded-xl border border-white/20 bg-black/15 p-3 backdrop-blur-sm">
+                            <p className="text-sm font-bold">Scene sequence</p>
+                            <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/25">
+                              <div className="h-full w-2/3 rounded-full bg-cyan-200" />
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                      {activeMode.id === "chat" && (
+                        <div className="max-w-sm space-y-2">
+                          <div className="w-fit rounded-2xl rounded-bl-sm bg-white/20 px-3 py-2 text-xs backdrop-blur">Help me shape this idea…</div>
+                          <div className="ml-auto w-fit rounded-2xl rounded-br-sm bg-white px-3 py-2 text-xs font-semibold text-indigo-900 shadow-lg">Let’s make it clearer and more memorable.</div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
                   <div className="wx-well rounded-2xl p-4 sm:p-5 space-y-3">
                     <div className="flex items-center justify-between text-[11px] uppercase tracking-[0.2em] wx-subtle">
                       <span>Starter Prompt</span>
@@ -1531,6 +1980,11 @@ export default function WelcomePage({ onExplore, onSelectTool }) {
                         )}
                       </button>
                     </div>
+                    {copyError && (
+                      <p role="status" className="text-[11px] text-rose-500">
+                        Clipboard unavailable. Select and copy the prompt manually.
+                      </p>
+                    )}
                     <p className="font-serif italic text-base sm:text-lg wx-ink-soft leading-relaxed">
                       “{activeMode.prompt}”
                     </p>
@@ -1558,66 +2012,10 @@ export default function WelcomePage({ onExplore, onSelectTool }) {
           </div>
         </section>
 
-        {/* 1. QUICK OVERVIEW: Light slide from left */}
-        <section className="px-4 sm:px-8 lg:px-14 py-16 sm:py-24 wx-divider-t">
-          <div className="grid lg:grid-cols-12 gap-8 lg:gap-10">
-            <div className="lg:col-span-3 wx-anim-left">
-              <p className="text-xs uppercase tracking-[0.3em] wx-subtle font-semibold">In short</p>
-              <div className="mt-3 inline-flex items-center gap-2 text-xs wx-accent font-medium">
-                <Layers className="w-3.5 h-3.5" /> Unified Creative Workspace
-              </div>
-            </div>
-
-            <div className="lg:col-span-9 space-y-8 sm:space-y-10 wx-anim-left" style={{ transitionDelay: "90ms" }}>
-              <p className="text-xl sm:text-3xl lg:text-4xl font-semibold leading-snug tracking-tight wx-ink">
-                PlotCraft.AI brings storytelling, visuals, video, audio, and learning into one
-                studio—backed by an AI assistant that remembers your context.
-              </p>
-
-              <div className="grid sm:grid-cols-3 gap-4 sm:gap-6 text-sm wx-muted leading-relaxed">
-                <div className="wx-panel wx-panel-lift p-5 sm:p-6 rounded-2xl">
-                  <div className="wx-accent font-black tracking-wide mb-2">1 · Pick</div>
-                  Choose a tool across five organized groups, or search by keyword.
-                </div>
-                <div className="wx-panel wx-panel-lift p-5 sm:p-6 rounded-2xl">
-                  <div className="wx-accent font-black tracking-wide mb-2">2 · Create</div>
-                  Write, draw, design, or generate. Every draft stays organized in Projects.
-                </div>
-                <div className="wx-panel wx-panel-lift p-5 sm:p-6 rounded-2xl">
-                  <div className="wx-accent font-black tracking-wide mb-2">3 · Share</div>
-                  Publish to the Community, collect likes and feedback, and leave a review.
-                </div>
-              </div>
-            </div>
-          </div>
-        </section>
-
-        {/* TOOL MARQUEE */}
-        <section
-          className="wx-marquee-wrap py-7 sm:py-9 space-y-3 sm:space-y-4 wx-divider-y overflow-hidden"
-          aria-label="Tools marquee"
-        >
-          {[false, true].map((rev, row) => (
-            <div
-              key={row}
-              className={`wx-marquee ${rev ? "rev" : ""} gap-8 sm:gap-10 whitespace-nowrap text-2xl sm:text-4xl lg:text-5xl font-black tracking-tight wx-ink opacity-80`}
-            >
-              {marqueeRow.map((t, i) => (
-                <button
-                  key={`${row}-${i}`}
-                  type="button"
-                  onClick={() => launchApp(t.name)}
-                  className="inline-flex items-center gap-8 sm:gap-10 hover:opacity-100 transition-opacity cursor-pointer"
-                >
-                  <span>{t.name}</span>
-                  <span className="wx-accent text-xl sm:text-2xl" aria-hidden="true">
-                    ✦
-                  </span>
-                </button>
-              ))}
-            </div>
-          ))}
-        </section>
+        <FeaturedCreations
+          onOpenCommunity={() => launchApp("Community Feed")}
+          onCreate={() => launchApp()}
+        />
 
         {/* 2. STATS: Light upward rise */}
         <section className="px-4 sm:px-8 lg:px-14 py-16 sm:py-24">
@@ -1660,11 +2058,14 @@ export default function WelcomePage({ onExplore, onSelectTool }) {
               {FEATURES.map((f, i) => {
                 const isSelected = i === activeFeatureIdx;
                 return (
-                  <div
+                  <button
+                    type="button"
                     key={f.n}
                     onMouseEnter={() => handleSelectFeature(i)}
+                    onFocus={() => handleSelectFeature(i)}
                     onClick={() => handleSelectFeature(i)}
-                    className={`wx-row wx-anim-rise py-7 sm:py-9 px-3 sm:px-4 grid md:grid-cols-12 gap-3 sm:gap-4 items-start cursor-pointer ${
+                    aria-pressed={isSelected}
+                    className={`wx-row wx-anim-rise w-full appearance-none bg-transparent border-0 text-left py-7 sm:py-9 px-3 sm:px-4 grid md:grid-cols-12 gap-3 sm:gap-4 items-start cursor-pointer ${
                       isSelected ? "is-active" : ""
                     }`}
                     style={{ transitionDelay: `${i * 65}ms` }}
@@ -1684,7 +2085,7 @@ export default function WelcomePage({ onExplore, onSelectTool }) {
                       {f.text}
                     </p>
                     <ArrowUpRight className="wx-arrow hidden md:block md:col-span-1 justify-self-end w-5 h-5 wx-ink" />
-                  </div>
+                  </button>
                 );
               })}
             </div>
@@ -1876,7 +2277,7 @@ export default function WelcomePage({ onExplore, onSelectTool }) {
                   <figcaption className="mt-6 pt-4 wx-divider-t text-xs uppercase tracking-[0.2em] wx-subtle flex items-center justify-between">
                     <span>{r.name}</span>
                     <span className="text-amber-500">
-                      {"★".repeat(Math.max(1, Number(r.rating) || 5))}
+                      {"★".repeat(Math.min(5, Math.max(1, Number(r.rating) || 5)))}
                     </span>
                   </figcaption>
                 </figure>
@@ -1896,6 +2297,8 @@ export default function WelcomePage({ onExplore, onSelectTool }) {
             <button
               type="button"
               onClick={() => launchApp()}
+              disabled={leaving}
+              aria-busy={leaving}
               className="wx-cta rounded-xl inline-flex items-center gap-3 px-7 sm:px-9 py-4 sm:py-5 text-base sm:text-lg font-black"
             >
               Enter PlotCraft <ArrowUpRight className="w-5 h-5" />
@@ -1903,6 +2306,10 @@ export default function WelcomePage({ onExplore, onSelectTool }) {
           </div>
         </section>
 
+        </>)}
+        {route !== "home" && (
+          <RoutePage route={route} onBack={() => goRoute("home")} onLaunch={(name) => launchApp(name)} reviews={reviews} />
+        )}
         <footer className="px-4 sm:px-8 lg:px-14 py-8 wx-divider-t flex flex-wrap justify-between gap-4 text-xs wx-subtle">
           <span>
             Designed and developed by <span className="wx-ink font-medium">K.Ganesh</span>
@@ -1911,12 +2318,137 @@ export default function WelcomePage({ onExplore, onSelectTool }) {
         </footer>
       </div>
 
-      {/* Smooth exit fade into the app */}
+      {wipeKey > 0 && (
+        <>
+          <style>{WXP_CSS}</style>
+          <div key={wipeKey} aria-hidden="true" className="wxp-wipe" />
+        </>
+      )}
+
       <div
-        aria-hidden="true"
-        className="fixed inset-0 z-50 pointer-events-none transition-opacity duration-500"
-        style={{ background: isLight ? "#faf9fc" : "#07050c", opacity: leaving ? 1 : 0 }}
-      />
+        className={`wx-launch-overlay ${leaving ? "is-active" : ""}`}
+        aria-hidden={!leaving}
+        role={leaving ? "status" : undefined}
+        aria-live={leaving ? "polite" : undefined}
+      >
+        <div className="wx-launch-content">
+          <div className="wx-launch-mark" aria-hidden="true"><Sparkles size={25} /></div>
+          <p className="wx-launch-title">Opening your studio</p>
+          <p className="wx-launch-subtitle">Getting your creative workspace ready</p>
+          <div className="wx-launch-track" aria-hidden="true"><span /></div>
+        </div>
+      </div>
+
+      <div className="fixed bottom-4 left-4 z-[80] sm:bottom-6 sm:left-6">
+        {copilotOpen && (
+          <section
+            id="copilot-panel"
+            aria-label="PlotCraft Muse"
+            className="mb-3 w-[min(22rem,calc(100vw-2rem))] rounded-3xl border p-4 shadow-2xl backdrop-blur-xl sm:p-5"
+            style={{
+              background: "var(--wx-panel-bg)",
+              borderColor: "var(--wx-border-strong)",
+              color: "var(--wx-ink)",
+            }}
+          >
+            <div className="mb-3 flex items-start justify-between gap-3">
+              <div>
+                <p className="inline-flex items-center gap-2 text-sm font-black">
+                  <Sparkles className="h-4 w-4 wx-accent" /> PlotCraft Muse
+                </p>
+                <p className="mt-1 text-xs wx-muted">Describe it and Muse will start creating in the right workspace.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setCopilotOpen(false)}
+                aria-label="Close PlotCraft Muse"
+                className="rounded-lg p-1.5 wx-muted hover:wx-ink"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <form onSubmit={handleCopilotSubmit}>
+              <label htmlFor="copilot-prompt" className="sr-only">What do you want to create?</label>
+              <textarea
+                id="copilot-prompt"
+                rows={3}
+                value={copilotPrompt}
+                onChange={(event) => {
+                  setCopilotPrompt(event.target.value);
+                }}
+                placeholder="e.g. Create a Telugu horror story…"
+                className="w-full resize-none rounded-2xl border px-3.5 py-3 text-sm outline-none"
+                style={{
+                  background: "var(--wx-well-bg)",
+                  borderColor: "var(--wx-border)",
+                  color: "var(--wx-ink)",
+                }}
+              />
+              <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                <VoiceInputButton
+                  onTranscript={(transcript) => {
+                    setCopilotPrompt((current) => [current.trim(), transcript].filter(Boolean).join(" "));
+                    setVoiceReplies(true);
+                  }}
+                  className="wx-muted"
+                />
+                <button
+                  type="button"
+                  aria-pressed={voiceReplies}
+                  disabled={!isSpeechSupported()}
+                  onClick={() => setVoiceReplies((enabled) => !enabled)}
+                  className="inline-flex items-center gap-1.5 rounded-xl border px-3 py-2 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-40"
+                  style={{ borderColor: "var(--wx-border)" }}
+                  title={isSpeechSupported() ? "Speak AI Chat replies aloud" : "Spoken replies are not supported in this browser"}
+                >
+                  {voiceReplies ? <Volume2 className="h-4 w-4 wx-accent" /> : <VolumeX className="h-4 w-4" />}
+                  Speak replies {voiceReplies ? "on" : "off"}
+                </button>
+              </div>
+              <button
+                type="submit"
+                disabled={!copilotPrompt.trim()}
+                className="mt-2 w-full rounded-xl px-4 py-2.5 text-sm font-bold disabled:cursor-not-allowed disabled:opacity-50"
+                style={{ background: "var(--wx-accent-solid)", color: "var(--wx-accent-ink)" }}
+              >
+                Create with Muse
+              </button>
+            </form>
+            <p className="mt-2 text-[10px] leading-relaxed wx-subtle">
+              Stories, images and videos start automatically (sign-in may be required). Song prompts create lyrics; photo edits need a source file.
+            </p>
+            <div className="mt-3 flex flex-wrap gap-1.5">
+              {["Telugu horror story", "YouTube thumbnail", "Telugu song"].map((example) => (
+                <button
+                  key={example}
+                  type="button"
+                  onClick={() => selectCopilotExample(example)}
+                  className="rounded-full border px-2.5 py-1 text-[10px] font-semibold wx-muted hover:wx-ink"
+                  style={{ borderColor: "var(--wx-border)" }}
+                >
+                  {example}
+                </button>
+              ))}
+            </div>
+            {copilotTarget && (
+              <p className="mt-3 text-xs font-semibold wx-accent">
+                Ready for {copilotTarget}
+              </p>
+            )}
+          </section>
+        )}
+        <button
+          type="button"
+          aria-expanded={copilotOpen}
+          aria-controls="copilot-panel"
+          onClick={() => setCopilotOpen((open) => !open)}
+          className="inline-flex items-center gap-2 rounded-full px-4 py-3 text-sm font-black shadow-xl transition-transform hover:-translate-y-0.5"
+          style={{ background: "var(--wx-accent-solid)", color: "var(--wx-accent-ink)" }}
+        >
+          <Sparkles className="h-4 w-4" />
+          {copilotOpen ? "Close Muse" : "Ask PlotCraft Muse"}
+        </button>
+      </div>
     </div>
   );
-} 
+}
