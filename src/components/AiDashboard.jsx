@@ -7,8 +7,8 @@ import PlotCraftFX from "./PlotCraftFX";
 import PlotCraftDesign from "./PlotCraftDesign";
 import * as PlotCraftHeroModule from "./PlotCraftHero";
 const PlotCraftHero = PlotCraftHeroModule.default ?? PlotCraftHeroModule.PlotCraftHero;
-import { WorkspaceShortcuts, WorkspaceWelcome, WorkspaceRecent, WorkspaceGroup } from "./PlotCraftWorkspace.JSX";
-import VfxToolPanel from "./PlotCraftVfxTools.JSX";
+import { WorkspaceShortcuts, WorkspaceWelcome, WorkspaceRecent, WorkspaceGroup } from "./PlotCraftWorkspace.jsx";
+import VfxToolPanel from "./PlotCraftVfxTools.jsx";
 import {
   Sparkles,
   Plus,
