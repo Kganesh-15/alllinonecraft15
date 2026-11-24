@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
+import { parseSrt, serializeSrt } from "../services/subtitles";
 
 const MOTIONS = {
   "No motion": { from: { x: 0, y: 0, zoom: 1 }, to: { x: 0, y: 0, zoom: 1 } },
@@ -18,6 +19,17 @@ const ASPECTS = [
 ];
 
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+
+function downloadSrt(overlays) {
+  const { contents, count } = serializeSrt(overlays);
+  const url = URL.createObjectURL(new Blob([contents], { type: "application/x-subrip;charset=utf-8" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "plotcraft-subtitles.srt";
+  link.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return count;
+}
 
 function ActionButton({ children, active, onClick }) {
   return (
@@ -63,10 +75,39 @@ export default function PlotCraftVfxTools({
   setRenderOpts,
   totalSec,
   audio = [],
+  overlays = [],
   onAddCaption,
+  onImportCaptions,
   onAddBeatEffects,
 }) {
   const [caption, setCaption] = useState("");
+  const [captionFeedback, setCaptionFeedback] = useState("");
+  const captionFileRef = useRef(null);
+  const importSrt = async (file) => {
+    if (!file) return;
+    setCaptionFeedback("");
+    if (!/\.srt$/i.test(file.name) || file.size > 2 * 1024 * 1024) {
+      setCaptionFeedback("Choose an .srt file no larger than 2 MB.");
+      return;
+    }
+    try {
+      const cues = parseSrt(await file.text());
+      const result = onImportCaptions?.(cues);
+      setCaptionFeedback(result?.skipped
+        ? `Imported ${result.added} subtitles; skipped ${result.skipped} outside the video duration.`
+        : `Imported ${result?.added ?? cues.length} subtitles.`);
+    } catch (error) {
+      setCaptionFeedback(error.message || "Could not read the subtitle file.");
+    }
+  };
+  const exportSrt = () => {
+    try {
+      const count = downloadSrt(overlays);
+      setCaptionFeedback(`Exported ${count} timed text layers as SRT.`);
+    } catch (error) {
+      setCaptionFeedback(error.message || "Could not export subtitles.");
+    }
+  };
   const motion = clip?.motion || MOTIONS["No motion"];
   const from = motion.from || MOTIONS["No motion"].from;
   const to = motion.to || MOTIONS["No motion"].to;
@@ -204,9 +245,33 @@ export default function PlotCraftVfxTools({
           <div>
             <p className="text-sm font-black text-white">Caption studio</p>
             <p className="mt-1 text-[11px] leading-relaxed text-slate-400">
-              Add a timed, animated caption at the current playhead.
+              Add captions at the playhead or import/export timed subtitles in SRT format.
             </p>
           </div>
+          <input
+            ref={captionFileRef}
+            type="file"
+            accept=".srt,application/x-subrip,text/plain"
+            className="hidden"
+            onChange={(event) => {
+              importSrt(event.target.files?.[0]);
+              event.target.value = "";
+            }}
+          />
+          <div className="flex flex-wrap gap-2">
+            <button type="button" className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-bold text-slate-200 hover:bg-white/10" onClick={() => captionFileRef.current?.click()}>
+              Import SRT
+            </button>
+            <button
+              type="button"
+              disabled={!overlays.some((overlay) => overlay.kind === "text" && String(overlay.text || "").trim())}
+              className="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-bold text-slate-200 hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
+              onClick={exportSrt}
+            >
+              Export SRT
+            </button>
+          </div>
+          {captionFeedback && <p role="status" className="rounded-lg border border-white/10 bg-black/10 p-2 text-[11px] text-slate-300">{captionFeedback}</p>}
           <textarea
             value={caption}
             onChange={(event) => setCaption(event.target.value)}

@@ -56,7 +56,7 @@ const TOOL_GROUPS = [
     title: "AI Tools",
     accentVar: "--wx-group-ai",
     dotVar: "--wx-dot-ai",
-    tools: ["AI Chat", "Prompt Helper", "AI Image Generator", "AI Video Generator"],
+    tools: ["AI Chat", "Prompt Helper", "AI Image Generator", "AI Video Generator", "AI Link Reader & Downloader"],
   },
   {
     title: "Workspace",

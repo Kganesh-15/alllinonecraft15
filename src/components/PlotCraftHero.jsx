@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { ArrowUpRight, Play, Sparkles, Download, Check } from "lucide-react";
 
 /* PlotCraft animated editor hero.
@@ -206,7 +206,7 @@ export default function PlotCraftHero({ onStart, onDemo }) {
           </h1>
           <p className="eh-sub">Using One AI-Powered Creative Studio. Write, draw, edit and compose in a single place.</p>
           <ul className="eh-stats" aria-label="Highlights">
-            <li><b>28</b> AI Tools</li>
+            <li><b>29</b> AI Tools</li>
             <li><b>∞</b> Unlimited Projects</li>
             <li><b>✓</b> Auto Save</li>
             <li><b>↗</b> Export Anywhere</li>
