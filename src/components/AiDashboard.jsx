@@ -36,8 +36,10 @@ import {
   uploadVideoFile,
 } from "../services/openai";
 import { API_BASE } from "../services/config";
+import { getPerspectiveGuideLines, getSymmetrySegments } from "../services/drawingGuides";
 
 const LazyProjectsPanel = React.lazy(() => import("./ProjectsPanel"));
+const LazyWritingStudio = React.lazy(() => import("./WritingStudio.jsx"));
 const LazyPhotoDocumentEditor = React.lazy(() => import("./PhotoDocumentEditor.jsx"));
 const LazyProjectWorkspace = React.lazy(() => import("./ProjectsPanel").then((module) => ({ default: module.ProjectWorkspace })));
 const LazyTemplatesGallery = React.lazy(() => import("./ProjectsPanel").then((module) => ({ default: module.TemplatesGallery })));
@@ -46,6 +48,7 @@ const LazyPromptHelper = React.lazy(() => import("./PromptHelper"));
 const LazyFreeVideoHelper = React.lazy(() => import("./FreeVideoHelper"));
 const LazyVfxToolPanel = React.lazy(() => import("./PlotCraftVfxTools"));
 const LazyUtilityTools = React.lazy(() => import("./PlotCraftUtilities"));
+const LazyAiLinkReader = React.lazy(() => import("./AiLinkReader.jsx"));
 const LazyAboutPage = React.lazy(() => import("./AboutPage"));
 const LazyUsagePage = React.lazy(() => import("./UsagePage"));
 
@@ -3263,6 +3266,33 @@ function KineVideoStudio({ clips, overlays, audio = [], settings = {}, patchProj
     addLayers([caption]);
     notify("Caption added at the playhead.");
   };
+  const importCaptions = (captions) => {
+    const usable = captions.filter((cue) => total <= 0 || cue.start < total);
+    const added = usable.map((cue) => {
+      const end = total > 0 ? Math.min(cue.end, total) : cue.end;
+      return base("text", {
+        text: cue.text,
+        x: 50,
+        y: 86,
+        size: 25,
+        color: "#ffffff",
+        bg: "#111827",
+        bold: true,
+        font: "Sans",
+        start: cue.start,
+        end,
+        anim: "none",
+        animDur: 0.1,
+      });
+    }).filter((cue) => cue.end > cue.start);
+    if (added.length) {
+      setOverlays([...overlays, ...added]);
+      setSelOv(added[0].id);
+      setTool("captions");
+      notify(`Imported ${added.length} subtitle cues.`);
+    }
+    return { added: added.length, skipped: captions.length - added.length };
+  };
   const addBeatEffects = () => {
     const track = audio.find((item) => item.peaks?.length);
     if (!track) return notify("Import a song with a waveform first.");
@@ -3584,7 +3614,9 @@ function KineVideoStudio({ clips, overlays, audio = [], settings = {}, patchProj
                 setRenderOpts={setRenderOpts}
                 totalSec={total}
                 audio={audio}
+                overlays={overlays}
                 onAddCaption={addCaption}
+                onImportCaptions={importCaptions}
                 onAddBeatEffects={addBeatEffects}
               />
             </React.Suspense>
@@ -4035,31 +4067,154 @@ function MultiTrackAudioStudio({ notify, project, patchProject }) {
   const [busy, setBusy] = useState(false);
   const [master, setMaster] = useState(0.9);
   const [mode, setMode] = useState("sequence");
+  const [restoring, setRestoring] = useState(true);
+  const [importing, setImporting] = useState(false);
   const inputRef = useRef(null);
+  const tracksRef = useRef([]);
+  const notifyRef = useRef(notify);
+  const projectDataRef = useRef({ id: project.id, tracks: project.multitrackTracks, options: project.multitrackOptions });
   const selectedTrack = tracks.find(t => t.id === selected) || tracks[0] || null;
-  const update = (id, patch) => setTracks(prev => prev.map(t => t.id === id ? { ...t, ...patch } : t));
+  const updateOptions = (patch) => {
+    const options = { ...(projectDataRef.current.options || {}), ...patch };
+    projectDataRef.current.options = options;
+    patchProject({ multitrackOptions: options });
+    if (patch.master !== undefined) setMaster(patch.master);
+    if (patch.mode !== undefined) setMode(patch.mode);
+  };
+  const persistTracks = (next) => {
+    tracksRef.current = next;
+    setTracks(next);
+    patchProject({
+      multitrackTracks: next.map(({ id, name, assetId, duration, in: startIn, out, start, volume, fadeIn, fadeOut, speed, pan, muted, solo }) => ({
+        id, name, assetId, duration, in: startIn, out, start, volume, fadeIn, fadeOut, speed, pan, muted, solo,
+      })),
+    });
+  };
+  useEffect(() => {
+    projectDataRef.current = { id: project.id, tracks: project.multitrackTracks, options: project.multitrackOptions };
+    notifyRef.current = notify;
+  }, [project.id, project.multitrackTracks, project.multitrackOptions, notify]);
+  const restoreGenerationRef = useRef(0);
+  useEffect(() => {
+    const generation = ++restoreGenerationRef.current;
+    const storedTracks = Array.isArray(projectDataRef.current.tracks) ? projectDataRef.current.tracks : [];
+    const options = projectDataRef.current.options || {};
+    setMaster(options.master ?? 0.9);
+    setMode(options.mode || "sequence");
+    setRestoring(true);
+    tracksRef.current.forEach((track) => {
+      if (track.url) URL.revokeObjectURL(track.url);
+    });
+    tracksRef.current = [];
+    setTracks([]);
+    setSelected(null);
+
+    const restoreTracks = async () => {
+      const restored = [];
+      for (const track of storedTracks) {
+        try {
+          const blob = await loadAudioAsset(track.assetId);
+          if (!blob) throw new Error("The audio file is missing from local storage.");
+          const AudioContextConstructor = window.AudioContext || window.webkitAudioContext;
+          if (!AudioContextConstructor) throw new Error("Web Audio is not available in this browser.");
+          const context = new AudioContextConstructor();
+          let buffer;
+          try {
+            buffer = await context.decodeAudioData(await blob.arrayBuffer());
+          } finally {
+            await context.close();
+          }
+          if (generation !== restoreGenerationRef.current) continue;
+          restored.push({
+            ...track,
+            file: blob,
+            url: URL.createObjectURL(blob),
+            buffer,
+            duration: buffer.duration,
+          });
+        } catch (error) {
+          notifyRef.current(`Could not restore ${track.name}: ${error.message || "audio decode failed"}`);
+        }
+      }
+      if (generation !== restoreGenerationRef.current) {
+        restored.forEach((track) => URL.revokeObjectURL(track.url));
+        return;
+      }
+      tracksRef.current = restored;
+      setTracks(restored);
+      setSelected(restored[0]?.id || null);
+      setRestoring(false);
+    };
+    restoreTracks();
+    return () => {
+      restoreGenerationRef.current += 1;
+      tracksRef.current.forEach((track) => {
+        if (track.url) URL.revokeObjectURL(track.url);
+      });
+      tracksRef.current = [];
+    };
+  }, [project.id]);
+
+  const update = (id, patch) => persistTracks(tracks.map(t => t.id === id ? { ...t, ...patch } : t));
   const importFiles = async (files) => {
+    const targetProjectId = project.id;
     const added = [];
-    for (const file of Array.from(files || [])) {
-      if (!file.type.startsWith("audio/")) continue;
-      try {
-        const ctx = new (window.AudioContext || window.webkitAudioContext)();
-        const buffer = await ctx.decodeAudioData(await file.arrayBuffer());
-        await ctx.close();
+    setImporting(true);
+    try {
+      for (const file of Array.from(files || [])) {
+        if (!file.type.startsWith("audio/")) continue;
+        let buffer;
+        try {
+          const AudioContextConstructor = window.AudioContext || window.webkitAudioContext;
+          if (!AudioContextConstructor) throw new Error("Web Audio is not available in this browser.");
+          const context = new AudioContextConstructor();
+          try {
+            buffer = await context.decodeAudioData(await file.arrayBuffer());
+          } finally {
+            await context.close();
+          }
+        } catch (error) {
+          notify(`Could not decode ${file.name}: ${error.message || "try MP3, WAV, or OGG."}`);
+          continue;
+        }
+        if (projectDataRef.current.id !== targetProjectId) return;
+        const id = makeId("mix");
+        const assetId = makeId("audio_asset");
+        try {
+          await saveAudioAsset(assetId, file);
+        } catch (error) {
+          notify(`Could not store ${file.name} locally: ${error.message || "storage failed."}`);
+          continue;
+        }
+        if (projectDataRef.current.id !== targetProjectId) return;
         const duration = buffer.duration;
-        const url = URL.createObjectURL(file);
-        const start = mode === "sequence" ? tracks.reduce((m, t) => Math.max(m, t.start + (t.out - t.in) / (t.speed || 1)), 0) : 0;
-        added.push({ id: `mix_${Date.now()}_${Math.random().toString(36).slice(2,7)}`, name: file.name, file, url, buffer, duration, in: 0, out: duration, start, volume: 1, fadeIn: 0, fadeOut: 0, speed: 1, pan: 0, muted: false, solo: false });
-      } catch { notify(`Could not decode ${file.name}. Try MP3, WAV, or OGG.`); }
-    }
-    if (added.length) {
-      setTracks(prev => [...prev, ...added]);
-      setSelected(added[0].id);
-      notify(`${added.length} audio track(s) imported. Trim and arrange them, then export one mixed WAV.`);
+        const start = mode === "sequence"
+          ? [...tracks, ...added].reduce((m, t) => Math.max(m, t.start + (t.out - t.in) / (t.speed || 1)), 0)
+          : 0;
+        added.push({ id, assetId, name: file.name, file, url: URL.createObjectURL(file), buffer, duration, in: 0, out: duration, start, volume: 1, fadeIn: 0, fadeOut: 0, speed: 1, pan: 0, muted: false, solo: false });
+      }
+      if (added.length && projectDataRef.current.id === targetProjectId) {
+        persistTracks([...tracks, ...added]);
+        setSelected(added[0].id);
+        notify(`${added.length} audio track(s) imported. Trim and arrange them, then export one mixed WAV.`);
+      }
+    } finally {
+      setImporting(false);
     }
   };
-  const move = (id, dir) => setTracks(prev => { const i = prev.findIndex(t => t.id === id), j = i + dir; if (i < 0 || j < 0 || j >= prev.length) return prev; const n=[...prev]; [n[i],n[j]]=[n[j],n[i]]; return n; });
-  const remove = (id) => { setTracks(prev => prev.filter(t => t.id !== id)); if (selected === id) setSelected(null); };
+  const move = (id, dir) => {
+    const i = tracks.findIndex(t => t.id === id), j = i + dir;
+    if (i < 0 || j < 0 || j >= tracks.length) return;
+    const next = [...tracks];
+    [next[i], next[j]] = [next[j], next[i]];
+    persistTracks(next);
+  };
+  const remove = (id) => {
+    const removed = tracks.find((track) => track.id === id);
+    if (removed?.url) URL.revokeObjectURL(removed.url);
+    persistTracks(tracks.filter(t => t.id !== id));
+    if (selected === id) setSelected(null);
+  };
   const exportMix = async () => {
     if (!tracks.length) return notify("Import at least one song first.");
     setBusy(true);
@@ -4096,18 +4251,18 @@ function MultiTrackAudioStudio({ notify, project, patchProject }) {
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/10 bg-gradient-to-r from-indigo-500/15 via-violet-500/10 to-cyan-500/10 p-4">
-        <div><p className="text-lg font-black text-white">Multitrack Audio Workstation</p><p className="mt-1 text-xs text-slate-400">Import multiple songs, trim each one, arrange, blend and export a single mix.</p></div>
+        <div><p className="text-lg font-black text-white">Multitrack Audio Workstation</p><p className="mt-1 text-xs text-slate-400">Import multiple songs, trim each one, arrange, blend and export a single mix. Tracks and mix settings save with the project.</p></div>
         <div className="flex flex-wrap gap-2">
-          <button type="button" className="rounded-xl border border-white/15 px-3 py-2 text-xs font-bold" onClick={() => inputRef.current?.click()}><Upload className="mr-1 inline h-4 w-4"/>Import songs</button>
+          <button type="button" disabled={restoring || importing} className="rounded-xl border border-white/15 px-3 py-2 text-xs font-bold disabled:opacity-50" onClick={() => inputRef.current?.click()}><Upload className="mr-1 inline h-4 w-4"/>{restoring ? "Restoring…" : importing ? "Importing…" : "Import songs"}</button>
           <button type="button" disabled={busy || !tracks.length} className="rounded-xl bg-violet-600 px-4 py-2 text-xs font-black text-white disabled:opacity-50" onClick={exportMix}>{busy ? "Mixing…" : "Render & export WAV"}</button>
         </div>
-        <input ref={inputRef} type="file" accept="audio/*" multiple className="hidden" onChange={e => { importFiles(e.target.files); e.target.value=""; }}/>
+        <input ref={inputRef} type="file" accept="audio/*" multiple disabled={restoring || importing} className="hidden" onChange={e => { importFiles(e.target.files); e.target.value=""; }}/>
       </div>
       <div className="grid gap-3 md:grid-cols-[1fr_260px]">
         <Panel title="Track timeline" subtitle={`${tracks.length} tracks · ${tracks.filter(t=>!t.muted).length} active`}>
           <div className="mb-3 flex flex-wrap items-center gap-2 text-xs">
             <span className="font-bold text-slate-300">Arrangement</span>
-            <Pills items={["sequence","overlap"]} value={mode} onPick={setMode}/>
+            <Pills items={["sequence","overlap"]} value={mode} onPick={value=>updateOptions({mode:value})}/>
             <span className="text-slate-500">{mode === "sequence" ? "New imports append after the previous track" : "New imports start together for a layered mix"}</span>
           </div>
           <div className="space-y-2">
@@ -4140,7 +4295,7 @@ function MultiTrackAudioStudio({ notify, project, patchProject }) {
             <label className="flex items-center gap-2"><input type="checkbox" checked={selectedTrack.solo} onChange={e=>update(selectedTrack.id,{solo:e.target.checked})}/>Solo track</label>
             <button type="button" className="w-full rounded-lg border border-white/10 px-3 py-2 font-bold" onClick={()=>update(selectedTrack.id,{in:0,out:selectedTrack.duration,start:0,volume:1,fadeIn:0,fadeOut:0,speed:1,pan:0,muted:false,solo:false})}>Reset track settings</button>
           </div> : <p className="text-xs text-slate-400">Select a track to edit its trim, timing, volume, pan, speed and fades.</p>}
-          <div className="mt-4 border-t border-white/10 pt-3"><Slider label="Master volume" value={master} min={0} max={1} onChange={setMaster}/><p className="mt-2 text-[10px] leading-5 text-slate-500">Export uses browser Web Audio rendering. WAV is supported here; MP3 encoding requires an additional encoder.</p></div>
+          <div className="mt-4 border-t border-white/10 pt-3"><Slider label="Master volume" value={master} min={0} max={1} onChange={value=>updateOptions({master:value})}/><p className="mt-2 text-[10px] leading-5 text-slate-500">Export uses browser Web Audio rendering. WAV is supported here; MP3 encoding requires an additional encoder.</p></div>
         </Panel>
       </div>
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">{["Multi-import","Trim & split","Sequence / overlap","Fade & pan","WAV mixdown"].map(x=><div key={x} className="rounded-xl border border-white/10 bg-white/[0.03] p-2 text-center text-[10px] font-bold text-slate-300">{x}</div>)}</div>
@@ -4680,6 +4835,7 @@ function LegacyThemePicker({ value, onChange }) {
 
 const DB_NAME = "plotcraft_pro_2d3d_gen_v1";
 const STORE = "projects";
+const AUDIO_STORE = "audio_assets";
 
 const makeId = (prefix = "pc") =>
   `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
@@ -4871,6 +5027,16 @@ const freshProject = (category = "model") => {
     char2D: build2DCharacterSpec({ promptText: "Cyber Hero with Cape" }),
     model3D: build3DModelSpec({ promptText: "3D Stylized Character" }),
     graphicElements: defaultGraphicElements(),
+    brandKit: {
+      name: "",
+      background: "#ffffff",
+      primary: "#172033",
+      secondary: "#475569",
+      accent: "#7c3aed",
+      headingFont: "Arial",
+      bodyFont: "Arial",
+      logoElementId: "",
+    },
     videoClips: [],
     videoOverlays: [],
     audioClips: defaultAudioClips(),
@@ -4878,6 +5044,9 @@ const freshProject = (category = "model") => {
     writingBlocks: [
       { id: makeId("blk"), title: "Scene 1", text: "Start writing your scene here..." },
     ],
+    writingChapters: [{ id: "chapter-default", title: "Chapter 1" }],
+    characters: [],
+    storyTimeline: [],
     settings: {
       color: "#8b5cf6",
       brushSize: 6,
@@ -4897,6 +5066,8 @@ const freshProject = (category = "model") => {
       videoScale: 1,
       videoVolume: 0.8,
       videoMuted: false,
+      symmetryMode: "none",
+      perspectiveMode: "none",
       diyCells: Array.from({ length: 16 }, (_, i) => ({
         id: i,
         mode: i % 5 === 0 ? "cut" : i % 3 === 0 ? "fold" : "none",
@@ -4918,10 +5089,13 @@ function openDB() {
     if (typeof window === "undefined" || !window.indexedDB) {
       return reject(new Error("IndexedDB unavailable"));
     }
-    const req = window.indexedDB.open(DB_NAME, 1);
+    const req = window.indexedDB.open(DB_NAME, 2);
     req.onupgradeneeded = () => {
       if (!req.result.objectStoreNames.contains(STORE)) {
         req.result.createObjectStore(STORE, { keyPath: "id" });
+      }
+      if (!req.result.objectStoreNames.contains(AUDIO_STORE)) {
+        req.result.createObjectStore(AUDIO_STORE, { keyPath: "id" });
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -4973,6 +5147,68 @@ async function deleteProjectFromDB(id) {
     tx.onerror = () => {
       db.close();
       reject(tx.error);
+    };
+  });
+}
+
+async function saveAudioAsset(id, blob) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(AUDIO_STORE, "readwrite");
+    tx.objectStore(AUDIO_STORE).put({ id, blob });
+    tx.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+    tx.onerror = () => {
+      db.close();
+      reject(tx.error || new Error("Audio file could not be stored locally."));
+    };
+  });
+}
+
+async function loadAudioAsset(id) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(AUDIO_STORE, "readonly");
+    const req = tx.objectStore(AUDIO_STORE).get(id);
+    req.onsuccess = () => {
+      db.close();
+      resolve(req.result?.blob || null);
+    };
+    req.onerror = () => {
+      db.close();
+      reject(req.error || new Error("Stored audio could not be loaded."));
+    };
+  });
+}
+
+async function pruneUnusedAudioAssets() {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction([STORE, AUDIO_STORE], "readwrite");
+    const projectsRequest = tx.objectStore(STORE).getAll();
+    projectsRequest.onsuccess = () => {
+      const referenced = new Set(
+        (projectsRequest.result || []).flatMap((item) =>
+          (item.multitrackTracks || []).map((track) => track.assetId)
+        )
+      );
+      const assets = tx.objectStore(AUDIO_STORE);
+      const keysRequest = assets.getAllKeys();
+      keysRequest.onsuccess = () => {
+        keysRequest.result.forEach((key) => {
+          if (!referenced.has(key)) assets.delete(key);
+        });
+      };
+    };
+    tx.oncomplete = () => {
+      db.close();
+      resolve();
+    };
+    tx.onerror = () => {
+      db.close();
+      reject(tx.error || new Error("Unused audio files could not be cleaned up."));
     };
   });
 }
@@ -5402,6 +5638,7 @@ function PlotCraftProStudio({
   const cadBoardRef = useRef(null);
 
   const [selectedElId, setSelectedElId] = useState(null);
+  const [selectedElIds, setSelectedElIds] = useState([]);
   const [draggingElId, setDraggingElId] = useState(null);
   const graphicBoardRef = useRef(null);
 
@@ -5676,6 +5913,7 @@ function PlotCraftProStudio({
       setRedoStack([]);
       setSelectedPartId(next.cadParts[0]?.id || null);
       setSelectedElId(next.graphicElements[0]?.id || null);
+      setSelectedElIds(next.graphicElements[0]?.id ? [next.graphicElements[0].id] : []);
       setActiveVideoClipId(null);
       notify(`Created ${next.title}`);
     },
@@ -5707,6 +5945,9 @@ function PlotCraftProStudio({
         settings: { ...base.settings, ...(item.settings || {}) },
       };
       setProject(merged);
+      const selectedGraphicId = merged.graphicElements[0]?.id || null;
+      setSelectedElId(selectedGraphicId);
+      setSelectedElIds(selectedGraphicId ? [selectedGraphicId] : []);
       setActiveCategory(merged.category);
       setSaveStatus("saved");
       setTimeline(0);
@@ -5723,10 +5964,18 @@ function PlotCraftProStudio({
       if (!window.confirm("Delete this project? This cannot be undone.")) return;
       try {
         await deleteProjectFromDB(id);
+        let audioCleanupFailed = false;
+        try {
+          await pruneUnusedAudioAssets();
+        } catch {
+          audioCleanupFailed = true;
+        }
         const nextList = await listProjects();
         setProjects(nextList);
         if (project.id === id) handleNewProject(activeCategory);
-        notify("Deleted project.");
+        notify(audioCleanupFailed
+          ? "Project deleted, but unused audio files could not be cleaned up."
+          : "Deleted project.");
       } catch {
         notify("Could not delete project.");
       }
@@ -5945,12 +6194,23 @@ function PlotCraftProStudio({
     ctx.save();
     ctx.lineCap = "round";
     ctx.lineJoin = "round";
-    ctx.lineWidth = Number(settings.brushSize || 6);
+    const pressure = e.pointerType === "pen" && e.pressure > 0
+      ? Math.max(0.1, e.pressure)
+      : 1;
+    ctx.lineWidth = Number(settings.brushSize || 6) * pressure;
     ctx.strokeStyle =
       brushMode === "eraser" ? settings.canvasBg || "#ffffff" : settings.color || "#8b5cf6";
     ctx.beginPath();
-    ctx.moveTo(prev.x, prev.y);
-    ctx.lineTo(pt.x, pt.y);
+    getSymmetrySegments(
+      prev,
+      pt,
+      canvasRef.current.width,
+      canvasRef.current.height,
+      settings.symmetryMode || "none"
+    ).forEach(([start, end]) => {
+      ctx.moveTo(start.x, start.y);
+      ctx.lineTo(end.x, end.y);
+    });
     ctx.stroke();
     ctx.restore();
 
@@ -6063,6 +6323,10 @@ function PlotCraftProStudio({
   const renderStudioBody = () => {
     // 1. Art & Drawing
     if (activeCategory === "art") {
+      const symmetryMode = settings.symmetryMode || "none";
+      const perspectiveMode = settings.perspectiveMode || "none";
+      const perspectiveLines = getPerspectiveGuideLines(perspectiveMode);
+      const radialGuideCount = symmetryMode === "radial-6" ? 6 : symmetryMode === "radial-8" ? 8 : 0;
       return (
         <div className="grid gap-4 xl:grid-cols-[1fr_270px]">
           <Panel
@@ -6110,20 +6374,92 @@ function PlotCraftProStudio({
                   onChange={(e) => patchSettings({ brushSize: Number(e.target.value) })}
                 />
               </label>
+              <label className="flex items-center gap-2 rounded-xl border border-white/15 bg-white/[0.03] px-2.5 py-1.5 text-xs font-semibold">
+                Symmetry
+                <select
+                  aria-label="Drawing symmetry"
+                  value={symmetryMode}
+                  onChange={(event) => patchSettings({ symmetryMode: event.target.value })}
+                  className="rounded-lg border border-white/10 bg-slate-900 px-2 py-1 text-xs text-white"
+                >
+                  <option value="none">Off</option>
+                  <option value="vertical">Vertical axis</option>
+                  <option value="horizontal">Horizontal axis</option>
+                  <option value="both">Four-way</option>
+                  <option value="radial-6">Radial · 6</option>
+                  <option value="radial-8">Radial · 8</option>
+                </select>
+              </label>
+              <label className="flex items-center gap-2 rounded-xl border border-white/15 bg-white/[0.03] px-2.5 py-1.5 text-xs font-semibold">
+                Perspective
+                <select
+                  aria-label="Perspective guide"
+                  value={perspectiveMode}
+                  onChange={(event) => patchSettings({ perspectiveMode: event.target.value })}
+                  className="rounded-lg border border-white/10 bg-slate-900 px-2 py-1 text-xs text-white"
+                >
+                  <option value="none">Off</option>
+                  <option value="one-point">1-point</option>
+                  <option value="two-point">2-point</option>
+                  <option value="three-point">3-point</option>
+                </select>
+              </label>
               <Btn secondary onClick={handleExportPNG}>
                 <Download className="h-3.5 w-3.5" /> PNG
               </Btn>
             </div>
-            <canvas
-              ref={canvasRef}
-              width={1000}
-              height={580}
-              className="w-full cursor-crosshair touch-none rounded-xl border border-white/15 bg-white"
-              onPointerDown={onCanvasPointerDown}
-              onPointerMove={onCanvasPointerMove}
-              onPointerUp={onCanvasPointerUp}
-              onPointerCancel={onCanvasPointerUp}
-            />
+            <div className="relative w-full overflow-hidden rounded-xl border border-white/15">
+              <canvas
+                ref={canvasRef}
+                width={1000}
+                height={580}
+                className="block w-full cursor-crosshair touch-none bg-white"
+                onPointerDown={onCanvasPointerDown}
+                onPointerMove={onCanvasPointerMove}
+                onPointerUp={onCanvasPointerUp}
+                onPointerCancel={onCanvasPointerUp}
+              />
+              {(symmetryMode !== "none" || perspectiveLines.length > 0) && (
+                <svg
+                  aria-hidden="true"
+                  viewBox="0 0 1000 580"
+                  preserveAspectRatio="none"
+                  className="pointer-events-none absolute inset-0 h-full w-full"
+                >
+                  <g stroke="#0ea5e9" strokeDasharray="8 8" strokeOpacity="0.48" strokeWidth="2">
+                    {symmetryMode === "vertical" || symmetryMode === "both"
+                      ? <line x1="500" y1="0" x2="500" y2="580" />
+                      : null}
+                    {symmetryMode === "horizontal" || symmetryMode === "both"
+                      ? <line x1="0" y1="290" x2="1000" y2="290" />
+                      : null}
+                    {radialGuideCount > 0 && Array.from({ length: radialGuideCount }, (_, index) => {
+                      const angle = (index * Math.PI * 2) / radialGuideCount;
+                      return (
+                        <line
+                          key={`radial-guide-${index}`}
+                          x1="500"
+                          y1="290"
+                          x2={500 + Math.cos(angle) * 620}
+                          y2={290 + Math.sin(angle) * 620}
+                        />
+                      );
+                    })}
+                  </g>
+                  <g stroke="#f59e0b" strokeDasharray="4 7" strokeOpacity="0.35" strokeWidth="1.5">
+                    {perspectiveLines.map(([start, end], index) => (
+                      <line
+                        key={`perspective-guide-${index}`}
+                        x1={start.x}
+                        y1={start.y}
+                        x2={end.x}
+                        y2={end.y}
+                      />
+                    ))}
+                  </g>
+                </svg>
+              )}
+            </div>
             <p className="mt-2 text-[11px] text-slate-400">
               {isDrawing
                 ? `Drawing on ${layers.find((l) => l.id === activeLayerId)?.name || "layer"}…`
@@ -6709,12 +7045,99 @@ function PlotCraftProStudio({
       const graphicGrid = settings.graphicGrid !== false;
       const activeEl =
         graphicElements.find((el) => el.id === selectedElId) || graphicElements[0] || null;
+      const brandKit = {
+        name: "",
+        background: "#ffffff",
+        primary: "#172033",
+        secondary: "#475569",
+        accent: "#7c3aed",
+        headingFont: "Arial",
+        bodyFont: "Arial",
+        logoElementId: "",
+        ...(project.brandKit || {}),
+      };
+      const brandLogo = graphicElements.find((el) => el.id === brandKit.logoElementId && el.type === "image");
+      const patchBrandKit = (patch) => patchProject({ brandKit: { ...brandKit, ...patch } });
+      const getBlendMode = (element) => {
+        const supportedModes = [
+          "normal", "multiply", "screen", "overlay", "darken", "lighten",
+          "color-dodge", "color-burn", "hard-light", "soft-light",
+          "difference", "exclusion",
+        ];
+        return supportedModes.includes(element.blendMode) ? element.blendMode : "normal";
+      };
+      const blendAttribute = (element) => `style="mix-blend-mode:${getBlendMode(element)}"`;
+      const selectGraphicLayer = (element) => {
+        setSelectedElId(element.id);
+        const selectedGroup = element.groupId
+          ? graphicElements.filter((item) => item.groupId === element.groupId).map((item) => item.id)
+          : [element.id];
+        setSelectedElIds(selectedGroup);
+      };
+      const groupSelectedLayers = () => {
+        const selectedIds = new Set(selectedElIds);
+        if (selectedIds.size < 2) return;
+        const groupId = makeId("group");
+        patchProject({
+          graphicElements: graphicElements.map((element) => (
+            selectedIds.has(element.id) ? { ...element, groupId } : element
+          )),
+        });
+      };
+      const ungroupSelectedLayers = () => {
+        const selectedIds = new Set(selectedElIds);
+        const groupIds = new Set(
+          graphicElements
+            .filter((element) => selectedIds.has(element.id) && element.groupId)
+            .map((element) => element.groupId)
+        );
+        if (!groupIds.size) return;
+        patchProject({
+          graphicElements: graphicElements.map((element) => (
+            groupIds.has(element.groupId) ? { ...element, groupId: null } : element
+          )),
+        });
+      };
+      const applyBrandKit = () => {
+        patchSettings({ graphicBg: brandKit.background });
+        patchProject({
+          graphicElements: graphicElements.map((element, index) => {
+            if (element.type === "image") return element;
+            if (element.type === "badge") {
+              return {
+                ...element,
+                bg: brandKit.accent,
+                fg: "#ffffff",
+                fontFamily: brandKit.bodyFont,
+              };
+            }
+            if (["rect", "circle", "triangle", "line"].includes(element.type)) {
+              const color = index % 2 === 0 ? brandKit.accent : brandKit.secondary;
+              return { ...element, bg: color, fg: color };
+            }
+            return {
+              ...element,
+              fg: element.type === "heading" ? brandKit.primary : brandKit.secondary,
+              fontFamily: element.type === "heading" ? brandKit.headingFont : brandKit.bodyFont,
+            };
+          }),
+        });
+        notify(`${brandKit.name || "Brand kit"} applied to the canvas.`);
+      };
 
       const updateEl = (id, patch) => {
+        const target = graphicElements.find((el) => el.id === id);
+        if (!target) return;
+        const deltaX = Number.isFinite(patch.x) ? patch.x - target.x : 0;
+        const deltaY = Number.isFinite(patch.y) ? patch.y - target.y : 0;
         patchProject({
-          graphicElements: graphicElements.map((el) =>
-            el.id === id ? { ...el, ...patch } : el
-          ),
+          graphicElements: graphicElements.map((el) => {
+            if (el.id === id) return { ...el, ...patch };
+            if (target.groupId && el.groupId === target.groupId && !el.locked && (deltaX || deltaY)) {
+              return { ...el, x: el.x + deltaX, y: el.y + deltaY };
+            }
+            return el;
+          }),
         });
       };
 
@@ -6740,13 +7163,15 @@ function PlotCraftProStudio({
         };
         patchProject({ graphicElements: [...graphicElements, el] });
         setSelectedElId(el.id);
+        setSelectedElIds([el.id]);
       };
 
       const duplicateEl = (el) => {
         if (!el) return;
-        const copy = { ...el, id: makeId("el"), x: el.x + 18, y: el.y + 18, text: el.text ? `${el.text} copy` : "" };
+        const copy = { ...el, id: makeId("el"), x: el.x + 18, y: el.y + 18, text: el.text ? `${el.text} copy` : "", groupId: null };
         patchProject({ graphicElements: [...graphicElements, copy] });
         setSelectedElId(copy.id);
+        setSelectedElIds([copy.id]);
       };
 
       const moveLayer = (id, direction) => {
@@ -6760,7 +7185,13 @@ function PlotCraftProStudio({
 
       const removeEl = (id) => {
         const next = graphicElements.filter((el) => el.id !== id);
-        patchProject({ graphicElements: next });
+        patchProject({
+          graphicElements: next,
+          ...(brandKit.logoElementId === id
+            ? { brandKit: { ...brandKit, logoElementId: "" } }
+            : {}),
+        });
+        setSelectedElIds((current) => current.filter((selectedId) => selectedId !== id));
         if (selectedElId === id) setSelectedElId(next[0]?.id || null);
       };
 
@@ -6783,6 +7214,7 @@ function PlotCraftProStudio({
           };
           patchProject({ graphicElements: [...graphicElements, el] });
           setSelectedElId(el.id);
+          setSelectedElIds([el.id]);
           notify("Image added to your design.");
         };
         reader.onerror = () => notify("Could not read that image.");
@@ -6799,25 +7231,25 @@ function PlotCraftProStudio({
           const transform = `rotate(${Number(el.rotation) || 0} ${x + w / 2} ${y + h / 2})`;
           const opacity = Number.isFinite(Number(el.opacity)) ? Number(el.opacity) : 1;
           if (el.type === "image" && el.src) {
-            return `<image href="${esc(el.src)}" x="${x}" y="${y}" width="${w}" height="${h}" preserveAspectRatio="xMidYMid meet" opacity="${opacity}" transform="${transform}"/>`;
+            return `<image href="${esc(el.src)}" x="${x}" y="${y}" width="${w}" height="${h}" preserveAspectRatio="xMidYMid meet" opacity="${opacity}" transform="${transform}" ${blendAttribute(el)}/>`;
           }
           if (["rect", "badge"].includes(el.type)) {
-            return `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="${el.type === "badge" ? h / 2 : 10}" fill="${esc(el.bg || "#8b5cf6")}" opacity="${opacity}" transform="${transform}"/>`;
+            return `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="${el.type === "badge" ? h / 2 : 10}" fill="${esc(el.bg || "#8b5cf6")}" opacity="${opacity}" transform="${transform}" ${blendAttribute(el)}/>`;
           }
           if (el.type === "circle") {
-            return `<ellipse cx="${x + w / 2}" cy="${y + h / 2}" rx="${w / 2}" ry="${h / 2}" fill="${esc(el.bg || "#ec4899")}" opacity="${opacity}" transform="${transform}"/>`;
+            return `<ellipse cx="${x + w / 2}" cy="${y + h / 2}" rx="${w / 2}" ry="${h / 2}" fill="${esc(el.bg || "#ec4899")}" opacity="${opacity}" transform="${transform}" ${blendAttribute(el)}/>`;
           }
           if (el.type === "triangle") {
-            return `<polygon points="${x + w / 2},${y} ${x + w},${y + h} ${x},${y + h}" fill="${esc(el.bg || "#0ea5e9")}" opacity="${opacity}" transform="${transform}"/>`;
+            return `<polygon points="${x + w / 2},${y} ${x + w},${y + h} ${x},${y + h}" fill="${esc(el.bg || "#0ea5e9")}" opacity="${opacity}" transform="${transform}" ${blendAttribute(el)}/>`;
           }
           if (el.type === "line") {
-            return `<line x1="${x}" y1="${y + h / 2}" x2="${x + w}" y2="${y + h / 2}" stroke="${esc(el.bg || el.fg || "#7c3aed")}" stroke-width="${Math.max(2, h)}" opacity="${opacity}" transform="${transform}"/>`;
+            return `<line x1="${x}" y1="${y + h / 2}" x2="${x + w}" y2="${y + h / 2}" stroke="${esc(el.bg || el.fg || "#7c3aed")}" stroke-width="${Math.max(2, h)}" opacity="${opacity}" transform="${transform}" ${blendAttribute(el)}/>`;
           }
           const text = esc(el.text).replace(/\n/g, "&#10;");
           const lines = text.split("&#10;");
           const lineHeight = (Number(el.fontSize) || 20) * 1.2;
           const tspans = lines.map((line, i) => `<tspan x="${x}" dy="${i === 0 ? 0 : lineHeight}">${line}</tspan>`).join("");
-          return `<text x="${x}" y="${y + (Number(el.fontSize) || 20)}" fill="${esc(el.fg || "#172033")}" font-family="${esc(el.fontFamily || "Arial")}" font-size="${Number(el.fontSize) || 20}" font-weight="${esc(el.fontWeight || "700")}" letter-spacing="${Number(el.letterSpacing) || 0}" text-anchor="${el.align === "center" ? "middle" : el.align === "right" ? "end" : "start"}" opacity="${opacity}" transform="${transform}">${tspans}</text>`;
+          return `<text x="${x}" y="${y + (Number(el.fontSize) || 20)}" fill="${esc(el.fg || "#172033")}" font-family="${esc(el.fontFamily || "Arial")}" font-size="${Number(el.fontSize) || 20}" font-weight="${esc(el.fontWeight || "700")}" letter-spacing="${Number(el.letterSpacing) || 0}" text-anchor="${el.align === "center" ? "middle" : el.align === "right" ? "end" : "start"}" opacity="${opacity}" transform="${transform}" ${blendAttribute(el)}>${tspans}</text>`;
         }).join("");
         const svg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${boardWidth}" height="${boardHeight}" viewBox="0 0 ${boardWidth} ${boardHeight}"><rect width="100%" height="100%" fill="${esc(graphicBg)}"/>${body}</svg>`;
         const blob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
@@ -6837,12 +7269,12 @@ function PlotCraftProStudio({
           const w = Number(el.w) || 120, h = Number(el.h) || 40;
           const rot = Number(el.rotation) || 0, opacity = Number(el.opacity ?? 1);
           const transform = `rotate(${rot} ${x + w / 2} ${y + h / 2})`;
-          if (el.type === "image" && el.src) return `<image href="${esc(el.src)}" x="${x}" y="${y}" width="${w}" height="${h}" preserveAspectRatio="xMidYMid meet" opacity="${opacity}" transform="${transform}"/>`;
-          if (el.type === "circle") return `<ellipse cx="${x+w/2}" cy="${y+h/2}" rx="${w/2}" ry="${h/2}" fill="${esc(el.bg)}" opacity="${opacity}" transform="${transform}"/>`;
-          if (el.type === "triangle") return `<polygon points="${x+w/2},${y} ${x+w},${y+h} ${x},${y+h}" fill="${esc(el.bg)}" opacity="${opacity}" transform="${transform}"/>`;
-          if (el.type === "line") return `<line x1="${x}" y1="${y+h/2}" x2="${x+w}" y2="${y+h/2}" stroke="${esc(el.bg || el.fg)}" stroke-width="${Math.max(2,h)}" opacity="${opacity}" transform="${transform}"/>`;
-          if (el.type === "rect" || el.type === "badge") return `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="${el.type === "badge" ? h/2 : 10}" fill="${esc(el.bg)}" opacity="${opacity}" transform="${transform}"/>`;
-          return `<text x="${x}" y="${y+(Number(el.fontSize)||20)}" fill="${esc(el.fg)}" font-family="${esc(el.fontFamily||"Arial")}" font-size="${Number(el.fontSize)||20}" font-weight="${esc(el.fontWeight||"700")}" letter-spacing="${Number(el.letterSpacing)||0}" opacity="${opacity}" transform="${transform}">${esc(el.text)}</text>`;
+          if (el.type === "image" && el.src) return `<image href="${esc(el.src)}" x="${x}" y="${y}" width="${w}" height="${h}" preserveAspectRatio="xMidYMid meet" opacity="${opacity}" transform="${transform}" ${blendAttribute(el)}/>`;
+          if (el.type === "circle") return `<ellipse cx="${x+w/2}" cy="${y+h/2}" rx="${w/2}" ry="${h/2}" fill="${esc(el.bg)}" opacity="${opacity}" transform="${transform}" ${blendAttribute(el)}/>`;
+          if (el.type === "triangle") return `<polygon points="${x+w/2},${y} ${x+w},${y+h} ${x},${y+h}" fill="${esc(el.bg)}" opacity="${opacity}" transform="${transform}" ${blendAttribute(el)}/>`;
+          if (el.type === "line") return `<line x1="${x}" y1="${y+h/2}" x2="${x+w}" y2="${y+h/2}" stroke="${esc(el.bg || el.fg)}" stroke-width="${Math.max(2,h)}" opacity="${opacity}" transform="${transform}" ${blendAttribute(el)}/>`;
+          if (el.type === "rect" || el.type === "badge") return `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="${el.type === "badge" ? h/2 : 10}" fill="${esc(el.bg)}" opacity="${opacity}" transform="${transform}" ${blendAttribute(el)}/>`;
+          return `<text x="${x}" y="${y+(Number(el.fontSize)||20)}" fill="${esc(el.fg)}" font-family="${esc(el.fontFamily||"Arial")}" font-size="${Number(el.fontSize)||20}" font-weight="${esc(el.fontWeight||"700")}" letter-spacing="${Number(el.letterSpacing)||0}" opacity="${opacity}" transform="${transform}" ${blendAttribute(el)}>${esc(el.text)}</text>`;
         }).join("");
         const svg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="${boardWidth*2}" height="${boardHeight*2}" viewBox="0 0 ${boardWidth} ${boardHeight}"><rect width="100%" height="100%" fill="${esc(graphicBg)}"/>${body}</svg>`;
         const image = new Image();
@@ -6883,6 +7315,7 @@ function PlotCraftProStudio({
         patchSettings({graphicBg:bg});
         patchProject({graphicElements:elements});
         setSelectedElId(elements[2].id);
+        setSelectedElIds([elements[2].id]);
         notify(`${name} style applied. Edit every layer on the canvas.`);
       };
 
@@ -6905,6 +7338,80 @@ function PlotCraftProStudio({
                 <span className="flex h-12 items-end gap-1 p-2" style={{background:bg}}><i className="h-5 w-5 rounded-full" style={{background:accent}}/><i className="h-2 flex-1 rounded" style={{background:fg,opacity:.8}}/></span>
                 <span className="block truncate px-2 py-2 text-[10px] font-black text-slate-200">{name}</span>
               </button>)}
+            </div>
+          </Panel>
+
+          <Panel title="Brand kit" subtitle="Save this project's palette, typography and an image-layer logo, then apply them to the canvas.">
+            <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+              <label className="block text-xs font-bold text-slate-300">
+                Brand name
+                <input
+                  type="text"
+                  value={brandKit.name}
+                  onChange={(event) => patchBrandKit({ name: event.target.value })}
+                  placeholder="Your brand"
+                  maxLength={60}
+                  className="mt-1 w-full rounded-lg border border-white/15 bg-white/[0.04] px-3 py-2 text-inherit"
+                />
+              </label>
+              {[
+                ["background", "Background"],
+                ["primary", "Primary"],
+                ["secondary", "Secondary"],
+                ["accent", "Accent"],
+              ].map(([key, label]) => (
+                <label key={key} className="block text-xs font-bold text-slate-300">
+                  {label} color
+                  <input
+                    type="color"
+                    value={brandKit[key]}
+                    onChange={(event) => patchBrandKit({ [key]: event.target.value })}
+                    className="mt-1 h-10 w-full cursor-pointer rounded-lg border border-white/15 bg-transparent p-1"
+                  />
+                </label>
+              ))}
+              {[
+                ["headingFont", "Heading font"],
+                ["bodyFont", "Body font"],
+              ].map(([key, label]) => (
+                <label key={key} className="block text-xs font-bold text-slate-300">
+                  {label}
+                  <select
+                    value={brandKit[key]}
+                    onChange={(event) => patchBrandKit({ [key]: event.target.value })}
+                    className="mt-1 w-full rounded-lg border border-white/15 bg-slate-900 px-3 py-2 text-white"
+                  >
+                    {["Arial", "Georgia", "Impact", "Trebuchet MS", "Courier New", "Verdana"].map((font) => (
+                      <option key={font} value={font}>{font}</option>
+                    ))}
+                  </select>
+                </label>
+              ))}
+            </div>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              {brandLogo && (
+                <img
+                  src={brandLogo.src}
+                  alt={`${brandKit.name || "Brand"} logo`}
+                  className="h-10 max-w-36 rounded-lg border border-white/10 bg-white/5 object-contain p-1"
+                />
+              )}
+              <Btn
+                secondary
+                disabled={activeEl?.type !== "image"}
+                onClick={() => patchBrandKit({ logoElementId: activeEl.id })}
+              >
+                {brandLogo ? "Replace logo with selected image" : "Set selected image as logo"}
+              </Btn>
+              {brandLogo && (
+                <Btn secondary onClick={() => patchBrandKit({ logoElementId: "" })}>
+                  Remove logo from kit
+                </Btn>
+              )}
+              <Btn onClick={applyBrandKit}>Apply brand kit to canvas</Btn>
+              {activeEl?.type !== "image" && (
+                <span className="text-[11px] text-slate-500">Upload and select an image layer to save it as the logo.</span>
+              )}
             </div>
           </Panel>
 
@@ -6962,6 +7469,7 @@ function PlotCraftProStudio({
                     width: el.w, minHeight: el.type === "line" ? 4 : undefined,
                     height: ["rect", "circle", "triangle", "image", "line"].includes(el.type) ? el.h : undefined,
                     opacity: el.opacity ?? 1,
+                    mixBlendMode: getBlendMode(el),
                     transform: `rotate(${el.rotation || 0}deg)`,
                     transformOrigin: "center",
                     border: selected ? "2px solid #f59e0b" : "1px solid transparent",
@@ -6973,7 +7481,7 @@ function PlotCraftProStudio({
                       key={el.id}
                       onPointerDown={(e) => {
                         e.stopPropagation();
-                        setSelectedElId(el.id);
+                        selectGraphicLayer(el);
                         if (!el.locked) {
                           e.currentTarget.setPointerCapture?.(e.pointerId);
                           setDraggingElId(el.id);
@@ -7027,11 +7535,43 @@ function PlotCraftProStudio({
 
             <div className="space-y-4">
               <Panel title="Layers" subtitle={`${graphicElements.length} objects`}>
+                <div className="mb-2 flex flex-wrap items-center gap-2">
+                  <Btn
+                    secondary
+                    disabled={selectedElIds.length < 2}
+                    onClick={groupSelectedLayers}
+                  >
+                    Group selected ({selectedElIds.length})
+                  </Btn>
+                  <Btn
+                    secondary
+                    disabled={!graphicElements.some((element) => (
+                      selectedElIds.includes(element.id) && element.groupId
+                    ))}
+                    onClick={ungroupSelectedLayers}
+                  >
+                    Ungroup
+                  </Btn>
+                  <span className="text-[10px] text-slate-500">Select layers with the checkboxes.</span>
+                </div>
                 <div className="max-h-64 space-y-1 overflow-y-auto">
                   {[...graphicElements].reverse().map((el) => (
                     <div key={el.id} className={`flex items-center gap-1 rounded-lg p-1.5 ${activeEl?.id === el.id ? "bg-violet-500/15 ring-1 ring-violet-400/40" : "bg-white/[0.03]"}`}>
-                      <button type="button" onClick={() => setSelectedElId(el.id)} className="min-w-0 flex-1 truncate px-1 text-left text-[11px] font-bold text-slate-200">
+                      <input
+                        type="checkbox"
+                        checked={selectedElIds.includes(el.id)}
+                        onChange={(event) => {
+                          setSelectedElId(el.id);
+                          setSelectedElIds((current) => event.target.checked
+                            ? [...new Set([...current, el.id])]
+                            : current.filter((id) => id !== el.id));
+                        }}
+                        aria-label={`Select ${el.text || el.type} for grouping`}
+                        className="accent-violet-500"
+                      />
+                      <button type="button" onClick={() => selectGraphicLayer(el)} className="min-w-0 flex-1 truncate px-1 text-left text-[11px] font-bold text-slate-200">
                         {el.type === "image" ? "Image" : (el.text || el.type).slice(0, 24)}
+                        {el.groupId && <span className="ml-1 text-violet-300">· Grouped</span>}
                       </button>
                       <button type="button" title={el.visible === false ? "Show layer" : "Hide layer"} aria-label={el.visible === false ? "Show layer" : "Hide layer"} onClick={() => updateEl(el.id, { visible: el.visible === false })} className="rounded p-1 text-slate-400 hover:bg-white/10">{el.visible === false ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}</button>
                       <button type="button" title={el.locked ? "Unlock layer" : "Lock layer"} aria-label={el.locked ? "Unlock layer" : "Lock layer"} onClick={() => updateEl(el.id, { locked: !el.locked })} className="rounded p-1 text-slate-400 hover:bg-white/10"><LockKeyhole className="h-3 w-3" /></button>
@@ -7046,6 +7586,29 @@ function PlotCraftProStudio({
               <Panel title="Element inspector">
                 {activeEl ? (
                   <div className="space-y-3 text-xs">
+                    <label className="block font-bold text-slate-300">
+                      Blend mode
+                      <select
+                        value={getBlendMode(activeEl)}
+                        onChange={(event) => updateEl(activeEl.id, { blendMode: event.target.value })}
+                        className="mt-1 w-full rounded-lg border border-white/15 bg-slate-900 px-2 py-2 text-white"
+                      >
+                        {[
+                          ["normal", "Normal"],
+                          ["multiply", "Multiply"],
+                          ["screen", "Screen"],
+                          ["overlay", "Overlay"],
+                          ["darken", "Darken"],
+                          ["lighten", "Lighten"],
+                          ["color-dodge", "Color dodge"],
+                          ["color-burn", "Color burn"],
+                          ["hard-light", "Hard light"],
+                          ["soft-light", "Soft light"],
+                          ["difference", "Difference"],
+                          ["exclusion", "Exclusion"],
+                        ].map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+                      </select>
+                    </label>
                     {activeEl.type !== "image" && !["rect", "circle", "triangle", "line"].includes(activeEl.type) && (
                       <label className="block font-bold text-slate-300">
                         Text
@@ -7120,117 +7683,17 @@ function PlotCraftProStudio({
 
     // 8. Writing & Stories
     if (activeCategory === "writing") {
-      const totalWords = writingBlocks
-        .map((b) => b.text.trim())
-        .join(" ")
-        .trim()
-        .split(/\s+/)
-        .filter(Boolean).length;
-
       return (
-        <Panel
-          title="Story, Comic & Script Builder"
-          subtitle="Manage scene or panel blocks and export as TXT."
-        >
-          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-            <div className="flex flex-wrap gap-1.5">
-              {["Story", "Comic script", "Screenplay"].map((m) => (
-                <Btn
-                  key={m}
-                  secondary
-                  active={writingMode === m}
-                  onClick={() => patchSettings({ writingMode: m })}
-                >
-                  {m}
-                </Btn>
-              ))}
-            </div>
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-slate-400">{totalWords} words</span>
-              <Btn
-                secondary
-                onClick={() =>
-                  patchProject({
-                    writingBlocks: [
-                      ...writingBlocks,
-                      {
-                        id: makeId("blk"),
-                        title:
-                          writingMode === "Comic script"
-                            ? `Panel ${writingBlocks.length + 1}`
-                            : `Scene ${writingBlocks.length + 1}`,
-                        text: "",
-                      },
-                    ],
-                  })
-                }
-              >
-                <Plus className="h-3.5 w-3.5" /> Add Block
-              </Btn>
-              <Btn
-                onClick={() => {
-                  const safeName = (project.title || "script").replace(/[^a-z0-9-_]/gi, "-");
-                  const body = writingBlocks.map((b) => `### ${b.title}\n${b.text}`).join("\n\n");
-                  downloadFile(
-                    new Blob([body], { type: "text/plain;charset=utf-8" }),
-                    `${safeName}.txt`
-                  );
-                }}
-              >
-                <Download className="h-3.5 w-3.5" /> TXT
-              </Btn>
-            </div>
-          </div>
-
-          <div className="grid gap-3 md:grid-cols-2">
-            {writingBlocks.map((blk, idx) => (
-              <div
-                key={blk.id}
-                className="rounded-2xl border border-white/10 bg-white/[0.03] p-3.5"
-              >
-                <div className="mb-2 flex items-center justify-between gap-2">
-                  <input
-                    className="flex-1 rounded-lg border border-white/10 bg-transparent px-2.5 py-1 text-xs font-bold text-violet-200"
-                    value={blk.title}
-                    onChange={(e) =>
-                      patchProject({
-                        writingBlocks: writingBlocks.map((item, i) =>
-                          i === idx ? { ...item, title: e.target.value } : item
-                        ),
-                      })
-                    }
-                  />
-                  {writingBlocks.length > 1 && (
-                    <button
-                      type="button"
-                      onClick={() =>
-                        patchProject({
-                          writingBlocks: writingBlocks.filter((_, i) => i !== idx),
-                        })
-                      }
-                      className="rounded-lg p-1 text-slate-400 hover:bg-rose-500/20 hover:text-rose-300"
-                    >
-                      <Trash2 className="h-3.5 w-3.5" />
-                    </button>
-                  )}
-                </div>
-                <textarea
-                  rows={4}
-                  className="w-full rounded-xl border border-white/10 bg-slate-950/60 p-2.5 text-xs leading-6 text-slate-100"
-                  value={blk.text}
-                  onChange={(e) =>
-                    patchProject({
-                      writingBlocks: writingBlocks.map((item, i) =>
-                        i === idx ? { ...item, text: e.target.value } : item
-                      ),
-                    })
-                  }
-                  placeholder="Write scene action or dialogue..."
-                />
-              </div>
-            ))}
-          </div>
-        </Panel>
+        <React.Suspense fallback={<PanelFallback label="writing studio" />}>
+          <LazyWritingStudio
+            project={project}
+            writingBlocks={writingBlocks}
+            writingMode={writingMode}
+            patchProject={patchProject}
+            patchSettings={patchSettings}
+            saveStatus={saveStatus}
+          />
+        </React.Suspense>
       );
     }
 
@@ -9899,6 +10362,7 @@ const NAV_GROUPS = [
       { id: "prompt", label: "Prompt Helper", icon: Wand2, go: { tab: "prompt" } },
       { id: "ai-image", label: "AI Image Generator", icon: ImageIcon, go: { action: "visuals", kind: "image" } },
       { id: "ai-video", label: "AI Video Generator", icon: Video, go: { action: "visuals", kind: "video" } },
+      { id: "link-reader", label: "AI Link Reader & Downloader", icon: Download, go: { tab: "ai-link-reader" } },
     ],
   },
   {
@@ -11440,6 +11904,12 @@ case "standard":
                     onActivity={logActivity}
                   />
                 </div>
+              )}
+
+              {currentTab === "ai-link-reader" && (
+                <React.Suspense fallback={<PanelFallback label="AI link reader" />}>
+                  <LazyAiLinkReader />
+                </React.Suspense>
               )}
 
               {currentTab === "prompt" && (

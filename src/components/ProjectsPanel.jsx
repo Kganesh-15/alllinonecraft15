@@ -6,7 +6,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Plus, FolderOpen, Copy, Pencil, Trash2, RotateCcw, Share2, ArrowLeft,
-  Cloud, CloudOff, AlertTriangle, CheckCircle2, Loader2,
+  Cloud, CloudOff, AlertTriangle, CheckCircle2, Loader2, Star,
 } from "lucide-react";
 
 const PROJECT_TYPES = ["design", "video", "audio", "story", "writing", "image"];
@@ -103,6 +103,14 @@ export default function ProjectsPanel({ api, onOpen }) {
   const [type, setType] = useState("design");
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState("recent");
+  const [favorites, setFavorites] = useState(() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem("plotcraft_project_favorites") || "[]");
+      return Array.isArray(stored) ? stored : [];
+    } catch {
+      return [];
+    }
+  });
   const [projects, setProjects] = useState([]);
   const [usage, setUsage] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -140,6 +148,22 @@ export default function ProjectsPanel({ api, onOpen }) {
     });
     return () => { active = false; };
   }, [loadProjects]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem("plotcraft_project_favorites", JSON.stringify(favorites));
+    } catch {
+      // Local storage can be unavailable in privacy modes.
+    }
+  }, [favorites]);
+
+  const toggleFavorite = (projectId) => {
+    setFavorites((current) => (
+      current.includes(projectId)
+        ? current.filter((id) => id !== projectId)
+        : [projectId, ...current]
+    ));
+  };
 
   const run = async (fn) => {
     setBusy(true);
@@ -187,10 +211,13 @@ export default function ProjectsPanel({ api, onOpen }) {
 
   const pct = usage ? Math.min(100, (usage.storageUsed / usage.storageLimit) * 100) : 0;
   const shownProjects = projects
+    .filter((project) => tab !== "favorites" || favorites.includes(project.id))
     .filter((project) => `${project.title} ${project.type}`.toLowerCase().includes(query.trim().toLowerCase()))
     .sort((a, b) => sort === "title"
       ? a.title.localeCompare(b.title)
-      : (b.updatedAt || 0) - (a.updatedAt || 0));
+      : favorites.includes(b.id) === favorites.includes(a.id)
+        ? (b.updatedAt || 0) - (a.updatedAt || 0)
+        : favorites.includes(b.id) ? -1 : 1);
 
   return (
     <div style={{ width: "100%", maxWidth: 960, margin: "0 auto", padding: 16 }}>
@@ -219,7 +246,7 @@ export default function ProjectsPanel({ api, onOpen }) {
       )}
 
       <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-        {[["active", "Projects"], ["trash", "Trash"]].map(([id, label]) => (
+        {[["active", "Projects"], ["favorites", "Favorites"], ["trash", "Trash"]].map(([id, label]) => (
           <button key={id} type="button" onClick={() => setTab(id)}
             style={{ ...btn, background: tab === id ? "var(--pc-accent, #7c3aed)" : "transparent", color: tab === id ? "#fff" : "inherit" }}>
             {label}
@@ -246,7 +273,13 @@ export default function ProjectsPanel({ api, onOpen }) {
       {notice && <p style={{ opacity: 0.8, marginBottom: 10, fontSize: 13 }}>{notice}</p>}
       {!shownProjects.length && (
         <div style={{ padding: 28, borderRadius: 18, border: "1px dashed rgba(127,127,127,.4)", textAlign: "center", opacity: .75 }}>
-          {query ? `No projects match “${query}”.` : tab === "trash" ? "Trash khali undi." : "Inka projects ledu. New project create cheyyandi."}
+          {query
+            ? `No projects match “${query}”.`
+            : tab === "trash"
+              ? "Trash khali undi."
+              : tab === "favorites"
+                ? "Favorite projects inkalevu. Star button tho add cheyyandi."
+                : "Inka projects ledu. New project create cheyyandi."}
         </div>
       )}
 
@@ -264,6 +297,16 @@ export default function ProjectsPanel({ api, onOpen }) {
               {tab === "active" ? (
                 <>
                   <button type="button" style={btn} onClick={() => onOpen?.(p)} title="Open" aria-label={`Open ${p.title}`}><FolderOpen size={14} /> Open</button>
+                  <button
+                    type="button"
+                    style={{ ...btn, color: favorites.includes(p.id) ? "#facc15" : "inherit" }}
+                    onClick={() => toggleFavorite(p.id)}
+                    title={favorites.includes(p.id) ? "Remove from favorites" : "Add to favorites"}
+                    aria-label={`${favorites.includes(p.id) ? "Remove" : "Add"} ${p.title} ${favorites.includes(p.id) ? "from" : "to"} favorites`}
+                    aria-pressed={favorites.includes(p.id)}
+                  >
+                    <Star size={14} fill={favorites.includes(p.id) ? "currentColor" : "none"} />
+                  </button>
                   <button type="button" style={btn} onClick={() => rename(p)} title="Rename" aria-label={`Rename ${p.title}`}><Pencil size={14} /></button>
                   <button type="button" style={btn} disabled={busy} onClick={() => run(() => api(`/api/projects/${p.id}/duplicate`, { method: "POST" }))} title="Duplicate" aria-label={`Duplicate ${p.title}`}><Copy size={14} /></button>
                   <button type="button" style={btn} disabled={busy} onClick={() => share(p)} title={p.shared ? "Unshare" : "Share"} aria-label={`${p.shared ? "Unshare" : "Share"} ${p.title}`}><Share2 size={14} /></button>
